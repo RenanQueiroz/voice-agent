@@ -95,16 +95,26 @@ async def _run_vad(
     display.listening()
 
     quit_event = asyncio.Event()
+    muted = False
 
-    async def check_quit() -> None:
+    async def check_keys() -> None:
+        nonlocal muted
         loop = asyncio.get_event_loop()
         while not quit_event.is_set():
             key = await loop.run_in_executor(None, read_key)
             if key == "q":
                 quit_event.set()
                 return
+            if key == "m":
+                muted = not muted
+                if muted:
+                    recorder.mute()
+                    display.muted()
+                else:
+                    recorder.unmute()
+                    display.unmuted()
 
-    quit_task = asyncio.create_task(check_quit())
+    quit_task = asyncio.create_task(check_keys())
 
     try:
         while not quit_event.is_set():

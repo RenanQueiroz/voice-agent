@@ -108,8 +108,11 @@ class Display:
         info.append("Input: ", style="dim")
         info.append(input_mode, style="bold")
         info.append("  │  ", style="dim")
+        info.append("M", style="bold yellow")
+        info.append(" mute", style="dim")
+        info.append("  │  ", style="dim")
         info.append("Q", style="bold yellow")
-        info.append(" to quit", style="dim")
+        info.append(" quit", style="dim")
         info.append("\n")
         info.append("STT: ", style="dim")
         info.append(_short(settings.stt_model), style="cyan")
@@ -128,6 +131,13 @@ class Display:
     # ── Conversation State ───────────────────────────────────
 
     def listening(self) -> None:
+        self.console.print("[green]●[/] [dim]Listening...[/]")
+
+    def muted(self) -> None:
+        self.vad_clear()
+        self.console.print("[red]●[/] [dim]Muted[/] [dim](press M to unmute)[/]")
+
+    def unmuted(self) -> None:
         self.console.print("[green]●[/] [dim]Listening...[/]")
 
     def recording_start(self) -> None:

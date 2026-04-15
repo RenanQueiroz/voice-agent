@@ -104,16 +104,39 @@ class VADRecorder:
         self.sample_rate = settings.sample_rate
         self.vad = webrtcvad.Vad(settings.vad_aggressiveness)
         self.silence_threshold = settings.vad_silence_ms // 20
-        self._paused = asyncio.Event()
-        self._paused.set()
+        self._muted = False
         self._energy_threshold = settings.vad_energy_threshold
         self._display = display
+        self._stream: sd.InputStream | None = None
+
+    def _open_stream(self) -> sd.InputStream:
+        if self._stream is None or self._stream.closed:
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate, channels=CHANNELS, dtype="int16"
+            )
+            self._stream.start()
+        return self._stream
+
+    def _close_stream(self) -> None:
+        if self._stream is not None and not self._stream.closed:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+
+    def mute(self) -> None:
+        self._muted = True
+        self._close_stream()
+
+    def unmute(self) -> None:
+        self._muted = False
 
     def pause(self) -> None:
-        self._paused.clear()
+        """Pause without releasing the mic (used during TTS playback)."""
+        self._muted = True
 
     def resume(self) -> None:
-        self._paused.set()
+        """Resume after pause (reopens mic)."""
+        self._muted = False
 
     async def record_segment(
         self, quit_event: asyncio.Event | None = None
@@ -124,11 +147,6 @@ class VADRecorder:
         frame_samples = int(self.sample_rate * frame_duration_ms / 1000)
         frame_16k_samples = int(16000 * frame_duration_ms / 1000)
 
-        stream = sd.InputStream(
-            samplerate=self.sample_rate, channels=CHANNELS, dtype="int16"
-        )
-        stream.start()
-
         speech_buffer: list[np.ndarray] = []
         silence_count = 0
         is_speaking = False
@@ -138,7 +156,12 @@ class VADRecorder:
                 if quit_event and quit_event.is_set():
                     return np.array([], dtype=np.int16)
 
-                await self._paused.wait()
+                if self._muted:
+                    self._close_stream()
+                    await asyncio.sleep(0.05)
+                    continue
+
+                stream = self._open_stream()
 
                 if stream.read_available < frame_samples:
                     await asyncio.sleep(0.005)
@@ -177,8 +200,7 @@ class VADRecorder:
                         self._display.vad_clear()
                         break
         finally:
-            stream.stop()
-            stream.close()
+            self._close_stream()
 
         return np.concatenate(speech_buffer)
 
