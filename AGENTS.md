@@ -35,7 +35,7 @@ voice-agent/
 - `.env` -- gitignored, secrets only (API keys).
 - `mcp_servers.toml` -- gitignored, MCP server definitions. Copy from `mcp_servers.toml.example`.
 - `models.ini` -- gitignored, llama-server model preset file. Copy from `models.ini.example`. Only used when `llm_server = "llamacpp"`.
-- `setup-whisper.sh` -- committed, builds whisper.cpp and downloads whisper models into `whispercpp/`.
+- `setup-whispercpp.sh` -- committed, builds whisper.cpp and downloads whisper models into `whispercpp/`.
 - `model_deps.toml` -- committed, maps model name patterns to pip/brew dependencies.
 - Environment variables override `.env` which override `config.toml`.
 - `config.py` validates all required fields at startup and fails fast with `ConfigError`.
@@ -109,7 +109,7 @@ Environment variable substitution (`${VAR_NAME}`) is supported in all string val
 ### Server management (local mode)
 
 `ServerManager` handles three servers in local mode:
-- **whisper-server** (STT, port 9000): whisper.cpp's HTTP server with built-in VAD. Configured via `stt_url` and `stt_model` (whisper.cpp model name, e.g., `large-v3-turbo`). Built/downloaded by `setup-whisper.sh` into `whispercpp/`.
+- **whisper-server** (STT, port 9000): whisper.cpp's HTTP server with built-in VAD. Configured via `stt_url` and `stt_model` (whisper.cpp model name, e.g., `large-v3-turbo`). Built/downloaded by `setup-whispercpp.sh` into `whispercpp/`.
 - **mlx-audio** (TTS only, port 8000): Handles text-to-speech. Configured via `audio_url` and `tts_model`.
 - **LLM server** (port 8080): One of three backends:
   - **mlx-vlm**: Python module (`mlx_vlm.server`), supports `--kv-bits`/`--kv-quant-scheme`, health via `/v1/models`
@@ -120,7 +120,7 @@ Lifecycle:
 1. Check/install system deps (brew packages from `model_deps.toml`)
 2. Check/install pip packages (`mlx-audio[server,tts]`, mlx LLM package if applicable)
 3. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
-4. For whisper-server: run `setup-whisper.sh` to build whisper.cpp and download models
+4. For whisper-server: run `setup-whispercpp.sh` to build whisper.cpp and download models
 5. Patch known compatibility issues (misaki/espeak.py for Kokoro TTS)
 6. Start server subprocesses with stdout redirected to `logs/`
 7. Poll health endpoint until healthy (10 min timeout for model downloads)
@@ -156,5 +156,5 @@ uv run python -m voice-agent  # Run
 - **Blocking calls**: Any blocking I/O (key reads, HTTP calls) must use `run_in_executor` or async equivalents. Blocking the event loop freezes the VAD.
 - **Terminal state**: Always call `_restore_terminal()` on exit. If the process crashes without restoring, the terminal will be in cbreak mode (no echo, no line buffering).
 - **misaki/espeak.py patching**: The `_apply_patches()` method in `servers.py` fixes a known incompatibility between misaki and phonemizer 3.3. It replaces both the library path and data path from `espeakng_loader` (broken CI build paths) with system espeak-ng paths. The patch deletes `.pyc` cache files to ensure the fix takes effect.
-- **stt_model meaning differs by mode**: In cloud mode, `stt_model` is an OpenAI model name (e.g., `gpt-4o-transcribe`). In local mode, `stt_model` is a whisper.cpp model name (e.g., `large-v3-turbo`) -- not an MLX model path. The whisper model is managed by `setup-whisper.sh`, not pip.
+- **stt_model meaning differs by mode**: In cloud mode, `stt_model` is an OpenAI model name (e.g., `gpt-4o-transcribe`). In local mode, `stt_model` is a whisper.cpp model name (e.g., `large-v3-turbo`) -- not an MLX model path. The whisper model is managed by `setup-whispercpp.sh`, not pip.
 - **tts_voice is optional**: Some TTS models don't require a voice parameter. The config property returns `None` if not set, and providers handle `None` gracefully.

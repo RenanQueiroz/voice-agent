@@ -5,8 +5,8 @@ set -euo pipefail
 # the specified GGML model plus the Silero VAD model into ./whispercpp/.
 #
 # Usage:
-#   ./setup-whisper.sh [model-name]
-#   e.g.: ./setup-whisper.sh large-v3-turbo-q5_0
+#   ./setup-whispercpp.sh [model-name]
+#   e.g.: ./setup-whispercpp.sh large-v3-turbo-q5_0
 #
 # Supported models:
 #   tiny, tiny.en, base, base.en, small, small.en, small.en-tdrz,

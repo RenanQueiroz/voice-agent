@@ -73,7 +73,7 @@ In local mode, the agent will automatically:
 2. Install model-specific dependencies (see `model_deps.toml`)
 3. Install system packages via Homebrew (e.g., `espeak-ng`)
 4. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
-5. For whisper STT: run `setup-whisper.sh` to build whisper.cpp and download models
+5. For whisper STT: run `setup-whispercpp.sh` to build whisper.cpp and download models
 6. Patch known compatibility issues
 7. Start the whisper-server (STT), mlx-audio (TTS), and LLM server
 8. Wait for models to download and servers to be ready
@@ -262,7 +262,7 @@ voice-agent/
 | `./setup.sh` | Install all dependencies (core + local) |
 | `./setup.sh --update` | Update all dependencies to latest versions |
 | `./setup-llamacpp.sh` | Download/update llama.cpp binaries (for llamacpp backend) |
-| `./setup-whisper.sh` | Build whisper.cpp and download whisper models (for local STT) |
+| `./setup-whispercpp.sh` | Build whisper.cpp and download whisper models (for local STT) |
 
 ## Development
 
@@ -293,7 +293,7 @@ API errors automatically display the relevant server log tail.
 
 Local mode runs three servers:
 
-- **whisper-server** (port 9000): whisper.cpp HTTP server for STT with built-in VAD. Model set via `stt_model` (e.g., `large-v3-turbo`). Run `./setup-whisper.sh` to build and download models.
+- **whisper-server** (port 9000): whisper.cpp HTTP server for STT with built-in VAD. Model set via `stt_model` (e.g., `large-v3-turbo`). Run `./setup-whispercpp.sh` to build and download models.
 - **mlx-audio** (port 8000): Handles TTS only. Model set via `tts_model`.
 - **LLM server** (port 8080): Controlled by `llm_server` setting. Each backend has its own config subsection:
   - **`mlx-vlm`** (`[local.mlx-vlm]`): For vision-language models (gemma-4, qwen2-vl, etc.). Supports KV cache quantization via `kv_bits`/`kv_quant_scheme`.

@@ -237,11 +237,11 @@ class ServerManager:
         return True
 
     def _ensure_whisper(self) -> bool:
-        """Run setup-whisper.sh to ensure whisper-server and models are available."""
+        """Run setup-whispercpp.sh to ensure whisper-server and models are available."""
         whisper_bin = _PROJECT_ROOT / "whispercpp" / "whisper-server"
         stt_model = self.settings.stt_model
         model_file = _PROJECT_ROOT / "whispercpp" / "models" / f"ggml-{stt_model}.bin"
-        setup_script = _PROJECT_ROOT / "setup-whisper.sh"
+        setup_script = _PROJECT_ROOT / "setup-whispercpp.sh"
 
         if whisper_bin.exists() and model_file.exists():
             return True

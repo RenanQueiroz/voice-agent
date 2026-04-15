@@ -11,7 +11,7 @@ llm_model = "gpt-4o-mini"
 tts_voice = "alloy"
 
 [local]
-stt_model = "large-v3-turbo-q5_0"      # whisper.cpp model name (see setup-whisper.sh for supported list)
+stt_model = "large-v3-turbo-q5_0"      # whisper.cpp model name (see setup-whispercpp.sh for supported list)
 stt_url = "http://localhost:9000"  # whisper-server endpoint
 tts_model = "mlx-community/Kokoro-82M-bf16"
 #tts_model = "mlx-community/chatterbox-turbo-4bit"
