@@ -13,5 +13,8 @@ logs/
 # llama.cpp binaries
 llamacpp/
 
+# whisper.cpp binaries and models
+whispercpp/
+
 # llama.cpp model preset (user-specific, like .env)
 models.ini

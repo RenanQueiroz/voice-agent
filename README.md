@@ -73,10 +73,11 @@ In local mode, the agent will automatically:
 2. Install model-specific dependencies (see `model_deps.toml`)
 3. Install system packages via Homebrew (e.g., `espeak-ng`)
 4. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
-5. Patch known compatibility issues
-6. Start the STT/TTS server (mlx-audio) and the LLM server
-7. Wait for models to download and servers to be ready
-8. Begin listening
+5. For whisper STT: run `setup-whisper.sh` to build whisper.cpp and download models
+6. Patch known compatibility issues
+7. Start the whisper-server (STT), mlx-audio (TTS), and LLM server
+8. Wait for models to download and servers to be ready
+9. Begin listening
 
 ## Controls
 
@@ -116,12 +117,13 @@ llm_model = "gpt-4o-mini"
 tts_voice = "alloy"         # optional
 
 [local]
-stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
+stt_model = "large-v3-turbo"    # whisper.cpp model name
 tts_model = "mlx-community/Kokoro-82M-bf16"
 tts_voice = "af_heart"      # optional, some models don't need one
 llm_server = "mlx-vlm"     # "mlx-vlm", "mlx-lm", or "llamacpp"
 llm_url = "http://localhost:8080"
 audio_url = "http://localhost:8000"
+stt_url = "http://localhost:9000"
 
 [local.mlx-vlm]
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
@@ -239,14 +241,14 @@ voice-agent/
   audio.py          # VADRecorder, AudioPlayer, mic/speaker I/O
   display.py        # Rich TUI with persistent footer
   pipeline.py       # Async conversation loop with interruption
-  providers.py      # Model providers, streaming TTS, transcript workflow
-  servers.py        # Local server lifecycle (mlx-audio, mlx-vlm/mlx-lm/llamacpp)
+  providers.py      # Model providers (WhisperCppSTTModel, StreamingTTSModel), transcript workflow
+  servers.py        # Local server lifecycle (whisper-server, mlx-audio, mlx-vlm/mlx-lm/llamacpp)
   mcp.py            # MCP server loading from mcp_servers.toml
 ```
 
 ### Key Design Decisions
 
-- **OpenAI-compatible endpoints**: All local backends (mlx-audio, mlx-vlm, mlx-lm, llamacpp) expose OpenAI-compatible APIs, so we reuse the SDK's existing `OpenAISTTModel`, `OpenAITTSModel`, and `OpenAIChatCompletionsModel` pointed at localhost.
+- **OpenAI-compatible endpoints**: Local TTS (mlx-audio) and LLM backends (mlx-vlm, mlx-lm, llamacpp) expose OpenAI-compatible APIs, so we reuse the SDK's existing `OpenAITTSModel` and `OpenAIChatCompletionsModel` pointed at localhost. Local STT uses whisper.cpp via the custom `WhisperCppSTTModel`.
 - **VAD with pre-roll**: A 100ms ring buffer captures audio before speech onset, preventing clipped words. Speech requires 3 consecutive frames (60ms) to confirm, filtering transient noise.
 - **Echo suppression**: The mic is muted during agent response to prevent the agent from hearing its own voice through speakers. Press Space to interrupt instead.
 - **Streaming**: LLM tokens stream via SSE, TTS audio streams via chunked HTTP (`stream=True`), and the SDK's sentence splitter sends text to TTS at sentence boundaries rather than waiting for the full response.
@@ -260,6 +262,7 @@ voice-agent/
 | `./setup.sh` | Install all dependencies (core + local) |
 | `./setup.sh --update` | Update all dependencies to latest versions |
 | `./setup-llamacpp.sh` | Download/update llama.cpp binaries (for llamacpp backend) |
+| `./setup-whisper.sh` | Build whisper.cpp and download whisper models (for local STT) |
 
 ## Development
 
@@ -280,20 +283,24 @@ uv run python -m voice-agent
 ### Server logs
 
 When running in local mode, server logs are saved to `logs/`:
-- `logs/mlx-audio_port_8000.log` -- STT/TTS server
+- `logs/whisper-server_port_9000.log` -- STT server (whisper.cpp)
+- `logs/mlx-audio_port_8000.log` -- TTS server
 - `logs/mlx-vlm_port_8080.log` / `logs/llamacpp_port_8080.log` -- LLM server
 
 API errors automatically display the relevant server log tail.
 
-### Choosing an LLM backend
+### Local server topology
 
-The `llm_server` setting in `[local]` controls which server runs the LLM. Each backend has its own config subsection:
+Local mode runs three servers:
 
-- **`mlx-vlm`** (`[local.mlx-vlm]`): For vision-language models (gemma-4, qwen2-vl, etc.). Supports KV cache quantization via `kv_bits`/`kv_quant_scheme`.
-- **`mlx-lm`** (`[local.mlx-lm]`): For text-only MLX models (llama, qwen, etc.)
-- **`llamacpp`** (`[local.llamacpp]`): Uses llama.cpp's `llama-server` with GGUF models. Models are configured in a separate INI preset file (see `models.ini.example`). Run `./setup-llamacpp.sh` to download the binary.
+- **whisper-server** (port 9000): whisper.cpp HTTP server for STT with built-in VAD. Model set via `stt_model` (e.g., `large-v3-turbo`). Run `./setup-whisper.sh` to build and download models.
+- **mlx-audio** (port 8000): Handles TTS only. Model set via `tts_model`.
+- **LLM server** (port 8080): Controlled by `llm_server` setting. Each backend has its own config subsection:
+  - **`mlx-vlm`** (`[local.mlx-vlm]`): For vision-language models (gemma-4, qwen2-vl, etc.). Supports KV cache quantization via `kv_bits`/`kv_quant_scheme`.
+  - **`mlx-lm`** (`[local.mlx-lm]`): For text-only MLX models (llama, qwen, etc.)
+  - **`llamacpp`** (`[local.llamacpp]`): Uses llama.cpp's `llama-server` with GGUF models. Models are configured in a separate INI preset file (see `models.ini.example`). Run `./setup-llamacpp.sh` to download the binary.
 
-All backends expose the same OpenAI-compatible API, so the rest of the pipeline works identically.
+All LLM backends expose the same OpenAI-compatible API, so the rest of the pipeline works identically.
 
 ### VAD too sensitive / not sensitive enough
 

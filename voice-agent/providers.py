@@ -8,13 +8,24 @@ from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import io
+import wave
+
+import httpx
+import numpy as np
 from openai import AsyncOpenAI
 
 from agents import Agent, Runner
 from agents.mcp import MCPServer
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
-from agents.voice.model import TTSModelSettings
+from agents.voice.input import AudioInput, StreamedAudioInput
+from agents.voice.model import (
+    STTModel,
+    STTModelSettings,
+    StreamedTranscriptionSession,
+    TTSModelSettings,
+)
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
@@ -46,6 +57,76 @@ class StreamingTTSModel(OpenAITTSModel):
         async with response as stream:
             async for chunk in stream.iter_bytes(chunk_size=1024):
                 yield chunk
+
+
+def _resample_wav_16k(audio_input: AudioInput) -> bytes:
+    """Convert AudioInput (24kHz int16) to a 16kHz WAV byte buffer."""
+    buf = audio_input.buffer
+    src_rate = audio_input.frame_rate
+    dst_rate = 16000
+    if src_rate != dst_rate:
+        # Simple linear interpolation resampling
+        duration = len(buf) / src_rate
+        n_out = int(duration * dst_rate)
+        indices = np.linspace(0, len(buf) - 1, n_out)
+        buf = np.interp(indices, np.arange(len(buf)), buf.astype(np.float64))
+        buf = buf.astype(np.int16)
+    # Encode as WAV
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(dst_rate)
+        wf.writeframes(buf.tobytes())
+    return wav_buf.getvalue()
+
+
+class WhisperCppSTTModel(STTModel):
+    """STT model that calls whisper.cpp server's /inference endpoint with VAD."""
+
+    def __init__(self, model_name: str, server_url: str):
+        self._model_name = model_name
+        self._server_url = server_url.rstrip("/")
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    async def transcribe(
+        self,
+        input: AudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> str:
+        wav_bytes = _resample_wav_16k(input)
+        fields: dict[str, str] = {
+            "temperature": "0.0",
+            "temperature_inc": "0.2",
+            "response_format": "json",
+        }
+        if settings.language:
+            fields["language"] = settings.language
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{self._server_url}/inference",
+                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                data=fields,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        return data.get("text", "").strip()
+
+    async def create_session(
+        self,
+        input: StreamedAudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> StreamedTranscriptionSession:
+        raise NotImplementedError(
+            "Streamed sessions not supported by WhisperCppSTTModel"
+        )
 
 
 class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
@@ -291,9 +372,14 @@ def create_pipeline(
             openai_client=tts_client,
         )
 
+    # For local mode, use WhisperCppSTTModel for whisper.cpp server
+    stt_model: str | WhisperCppSTTModel = settings.stt_model
+    if settings.voice_mode == "local" and settings.stt_url:
+        stt_model = WhisperCppSTTModel(settings.stt_model, settings.stt_url)
+
     pipeline = VoicePipeline(
         workflow=workflow,
-        stt_model=settings.stt_model,
+        stt_model=stt_model,
         tts_model=tts_model,
         config=config,
     )

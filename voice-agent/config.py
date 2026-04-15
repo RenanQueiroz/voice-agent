@@ -64,6 +64,7 @@ class Settings:
 
     # Local server config
     mlx_audio_url: str | None
+    stt_url: str | None  # whisper-server endpoint
     mlx_llm_url: str | None
     mlx_llm_server: str | None  # "mlx-vlm", "mlx-lm", or "llamacpp"
     mlx_kv_bits: str | None  # KV cache quantization bits (mlx-vlm only)
@@ -174,6 +175,7 @@ def load_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         # Local settings (optional when running cloud)
         mlx_audio_url=_get_optional("MLX_AUDIO_URL", local.get("audio_url")),
+        stt_url=_get_optional("STT_URL", local.get("stt_url")),
         mlx_llm_url=_get_optional(
             "MLX_LLM_URL", local.get("llm_url") or local.get("vlm_url")
         ),
@@ -221,6 +223,8 @@ def load_settings() -> Settings:
     if settings.voice_mode == "local":
         if not settings.mlx_audio_url:
             raise ConfigError("Missing config: local.audio_url in config.toml")
+        if not settings.stt_url:
+            raise ConfigError("Missing config: local.stt_url in config.toml")
         if not settings.mlx_llm_url:
             raise ConfigError("Missing config: local.llm_url in config.toml")
         if settings.mlx_llm_server not in ("mlx-vlm", "mlx-lm", "llamacpp"):

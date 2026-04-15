@@ -1,4 +1,4 @@
-"""Manages local mlx-audio and LLM server processes."""
+"""Manages local mlx-audio, whisper-server, and LLM server processes."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _LOG_DIR = _PROJECT_ROOT / "logs"
 
 
 class ServerManager:
-    """Starts, health-checks, and stops local mlx-audio and LLM servers."""
+    """Starts, health-checks, and stops local mlx-audio, whisper, and LLM servers."""
 
     def __init__(self, settings: Settings, display: Display):
         self.settings = settings
@@ -124,7 +124,7 @@ class ServerManager:
     def _ensure_system_deps(self) -> bool:
         """Install system-level (brew) dependencies if missing."""
         missing: list[str] = []
-        for model in [self.settings.tts_model, self.settings.stt_model]:
+        for model in [self.settings.tts_model]:
             for pkg in self._brew_for_model(model):
                 if not shutil.which(pkg):
                     missing.append(pkg)
@@ -164,7 +164,7 @@ class ServerManager:
         try:
             __import__("mlx_audio")
         except ImportError:
-            packages.append("mlx-audio[server,tts,stt]")
+            packages.append("mlx-audio[server,tts]")
 
         # Install the right MLX LLM server based on config (llamacpp is a binary, not pip)
         llm_server = self.settings.mlx_llm_server or "mlx-vlm"
@@ -176,7 +176,7 @@ class ServerManager:
             except ImportError:
                 packages.append(llm_pip)
 
-        for model in [self.settings.tts_model, self.settings.stt_model]:
+        for model in [self.settings.tts_model]:
             for dep in self._deps_for_model(model):
                 import_name = (
                     dep.split("<")[0].split(">")[0].split("=")[0].split("!")[0]
@@ -229,6 +229,44 @@ class ServerManager:
                 [
                     "llama-server binary not found after setup.",
                     f"Expected at: {llama_bin}",
+                ]
+            )
+            return False
+
+        self.display.server_installed()
+        return True
+
+    def _ensure_whisper(self) -> bool:
+        """Run setup-whisper.sh to ensure whisper-server and models are available."""
+        whisper_bin = _PROJECT_ROOT / "whispercpp" / "whisper-server"
+        stt_model = self.settings.stt_model
+        model_file = _PROJECT_ROOT / "whispercpp" / "models" / f"ggml-{stt_model}.bin"
+        setup_script = _PROJECT_ROOT / "setup-whisper.sh"
+
+        if whisper_bin.exists() and model_file.exists():
+            return True
+
+        if not setup_script.exists():
+            self.display.server_install_failed(
+                [f"Setup script not found: {setup_script}"]
+            )
+            return False
+
+        self.display.server_installing(["whisper.cpp"])
+        result = subprocess.run(
+            ["bash", str(setup_script), stt_model],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
+            return False
+
+        if not whisper_bin.exists():
+            self.display.server_install_failed(
+                [
+                    "whisper-server binary not found after setup.",
+                    f"Expected at: {whisper_bin}",
                 ]
             )
             return False
@@ -302,15 +340,18 @@ class ServerManager:
             pass
 
     async def start(self) -> bool:
-        """Start both servers and wait for them to be healthy. Returns True if ready."""
+        """Start all servers and wait for them to be healthy. Returns True if ready."""
         s = self.settings
         assert s.mlx_audio_url is not None  # validated in load_settings
+        assert s.stt_url is not None
         assert s.mlx_llm_url is not None
         assert s.mlx_llm_server is not None
         audio_url = s.mlx_audio_url
+        stt_url = s.stt_url
         llm_url = s.mlx_llm_url
         llm_server = s.mlx_llm_server
         audio_port = self._parse_port(audio_url)
+        stt_port = self._parse_port(stt_url)
         llm_port = self._parse_port(llm_url)
 
         self.display.server_setup_start()
@@ -320,7 +361,10 @@ class ServerManager:
 
         self._apply_patches()
 
-        # Start audio server (same for all LLM backends)
+        if not self._ensure_whisper():
+            return False
+
+        # Start TTS server (mlx-audio)
         audio_proc = self._start_process(
             [
                 sys.executable,
@@ -332,6 +376,33 @@ class ServerManager:
                 str(audio_port),
             ],
             f"mlx-audio (port {audio_port})",
+        )
+
+        # Start STT server (whisper.cpp with VAD)
+        whisper_bin = str(_PROJECT_ROOT / "whispercpp" / "whisper-server")
+        model_path = str(
+            _PROJECT_ROOT / "whispercpp" / "models" / f"ggml-{s.stt_model}.bin"
+        )
+        vad_model_path = str(
+            _PROJECT_ROOT / "whispercpp" / "models" / "ggml-silero-v5.1.2.bin"
+        )
+        stt_cmd = [
+            whisper_bin,
+            "-m",
+            model_path,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(stt_port),
+            "--vad",
+            "--vad-model",
+            vad_model_path,
+            "--convert",
+        ]
+
+        stt_proc = self._start_process(
+            stt_cmd,
+            f"whisper-server (port {stt_port})",
         )
 
         # Build LLM server command based on backend
@@ -375,14 +446,15 @@ class ServerManager:
             f"{llm_server} (port {llm_port})",
         )
 
-        audio_ok, llm_ok = await asyncio.gather(
+        audio_ok, stt_ok, llm_ok = await asyncio.gather(
             self._wait_for_health(audio_url, "mlx-audio", audio_proc),
+            self._wait_for_health(stt_url, "whisper-server", stt_proc, health_path="/"),
             self._wait_for_health(
                 llm_url, llm_server, llm_proc, health_path=llm_health_path
             ),
         )
 
-        if audio_ok and llm_ok:
+        if audio_ok and stt_ok and llm_ok:
             self.display.server_all_ready()
             return True
 
