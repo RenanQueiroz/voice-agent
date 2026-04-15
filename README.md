@@ -132,11 +132,21 @@ show_transcript = true      # Show user/agent text in console
 show_metrics = true         # Show STT/LLM/TTS timing
 
 [agent]
-instructions = "You are a helpful voice assistant."
+instructions = "You are a helpful voice assistant. Today is {date}."
 
 [audio]
 sample_rate = 24000
 ```
+
+Agent instructions support variable substitution:
+
+| Variable | Example output |
+|---|---|
+| `{date}` | April 15, 2026 |
+| `{time}` | 2:30 PM |
+| `{datetime}` | April 15, 2026 2:30 PM |
+| `{os}` | Darwin |
+| `${VAR_NAME}` | Environment variable from `.env` or system |
 
 ### .env
 

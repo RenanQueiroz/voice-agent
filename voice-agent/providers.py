@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import platform
+import re
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
@@ -150,12 +154,46 @@ def create_agent(
     else:
         model = settings.llm_model  # type: ignore[assignment]
 
+    instructions = _expand_instructions(settings.agent_instructions)
+
     return Agent(
         name="Assistant",
-        instructions=settings.agent_instructions,
+        instructions=instructions,
         model=model,
         mcp_servers=mcp_servers or [],
     )
+
+
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def _expand_instructions(text: str) -> str:
+    """Expand variables in agent instructions.
+
+    Supports:
+      {date}        - today's date (e.g., "April 15, 2026")
+      {time}        - current time (e.g., "2:30 PM")
+      {datetime}    - date and time
+      {os}          - operating system (e.g., "macOS")
+      ${VAR_NAME}   - environment variable
+    """
+    now = datetime.now(tz=timezone.utc).astimezone()
+
+    builtins = {
+        "date": now.strftime("%B %d, %Y"),
+        "time": now.strftime("%-I:%M %p"),
+        "datetime": now.strftime("%B %d, %Y %-I:%M %p"),
+        "os": platform.system(),
+    }
+
+    # Replace {name} builtins (single braces)
+    for key, value in builtins.items():
+        text = text.replace(f"{{{key}}}", value)
+
+    # Replace ${VAR_NAME} env vars
+    text = _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), m.group(0)), text)
+
+    return text
 
 
 def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
