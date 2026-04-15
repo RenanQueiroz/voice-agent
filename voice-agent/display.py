@@ -44,6 +44,7 @@ class Display:
         self._last_metrics: TurnMetrics | None = None
         self._vad_rms = 0
         self._vad_remaining_ms = 0
+        self._processing_duration = 0.0
 
     # ── Footer management ────────────────────────────────────
 
@@ -73,6 +74,7 @@ class Display:
             "idle": ("○", "dim"),
             "listening": ("●", "green"),
             "speaking": ("●", "bold green"),
+            "responding": ("●", "magenta"),
             "silence": ("●", "yellow"),
             "processing": ("●", "yellow"),
             "muted": ("●", "red"),
@@ -87,6 +89,10 @@ class Display:
             bar.append(energy_bar, style="green")
         elif self._state == "silence":
             bar.append(f"Silence  {self._vad_remaining_ms}ms", style=style)
+        elif self._state == "processing" and self._processing_duration > 0:
+            bar.append(
+                f"Processing {self._processing_duration:.1f}s of audio...", style=style
+            )
         else:
             bar.append(self._state.capitalize(), style=style)
 
@@ -231,8 +237,8 @@ class Display:
         self._vad_remaining_ms = 0
 
     def processing(self, duration: float) -> None:
+        self._processing_duration = duration
         self._set_state("processing")
-        self._print(f"[yellow]●[/] Processing {duration:.1f}s of audio...")
 
     def interrupted(self) -> None:
         self._print("[dim]  -- interrupted[/]")
@@ -247,7 +253,7 @@ class Display:
     def agent_start(self) -> None:
         self._agent_streaming = True
         self._agent_buffer = ""
-        self._set_state("speaking")
+        self._set_state("responding")
 
     def agent_chunk(self, text: str) -> None:
         self._agent_buffer += text
