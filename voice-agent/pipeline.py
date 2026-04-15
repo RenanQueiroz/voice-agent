@@ -11,10 +11,10 @@ from openai import APIConnectionError
 from agents import set_tracing_disabled
 from agents.voice import AudioInput
 
-from .audio import VADRecorder, play_response, read_key, record_push_to_talk
+from .audio import AudioPlayer, VADRecorder, read_key, record_push_to_talk
 from .config import Settings, load_settings
 from .display import Display
-from .providers import create_pipeline
+from .providers import TranscriptVoiceWorkflow, create_pipeline
 
 if TYPE_CHECKING:
     from .servers import ServerManager
@@ -23,12 +23,58 @@ logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
 set_tracing_disabled(True)
 
 
+async def _process_turn(
+    segment: bytes | object,
+    workflow: TranscriptVoiceWorkflow,
+    pipeline: object,
+    display: Display,
+    player: AudioPlayer,
+    settings: Settings,
+    server_manager: ServerManager | None,
+) -> None:
+    """Process a single conversation turn (STT → LLM → TTS → playback)."""
+    import numpy as np
+
+    audio_input = AudioInput(buffer=np.asarray(segment, dtype=np.int16))
+    turn_start = time.monotonic()
+    workflow.turn_start_time = turn_start
+
+    try:
+        result = await pipeline.run(audio_input)  # type: ignore[union-attr]
+        tts_total, tts_first = await player.play(result, display)
+
+        if settings.show_metrics:
+            m = workflow.last_metrics
+            m.tts_seconds = tts_total
+            m.tts_first_byte_seconds = tts_first
+            m.total_seconds = time.monotonic() - turn_start
+            display.metrics(m)
+    except APIConnectionError:
+        display.connection_error(settings)
+    except httpx.RemoteProtocolError:
+        display.tts_stream_error()
+        if server_manager:
+            display.api_error_with_logs(
+                "TTS stream interrupted", server_manager.get_all_server_logs()
+            )
+    except openai.AuthenticationError as e:
+        display.auth_error(e.message)
+    except openai.RateLimitError as e:
+        display.rate_limit_error(e.message)
+    except openai.APIError as e:
+        if server_manager:
+            display.api_error_with_logs(e.message, server_manager.get_all_server_logs())
+        else:
+            display.api_error(e.message)
+
+
 async def _run_push_to_talk(
     settings: Settings,
     display: Display,
     server_manager: ServerManager | None = None,
 ) -> None:
     workflow, pipeline = create_pipeline(settings, display)
+    player = AudioPlayer()
     display.ready_banner(settings)
 
     while True:
@@ -49,39 +95,9 @@ async def _run_push_to_talk(
             continue
 
         display.processing(len(buffer) / settings.sample_rate)
-        audio_input = AudioInput(buffer=buffer)
-        try:
-            turn_start = time.monotonic()
-            workflow.turn_start_time = turn_start
-            result = await pipeline.run(audio_input)
-            tts_total, tts_first = await play_response(result, display)
-            if settings.show_metrics:
-                m = workflow.last_metrics
-                m.tts_seconds = tts_total
-                m.tts_first_byte_seconds = tts_first
-                m.total_seconds = time.monotonic() - turn_start
-                display.metrics(m)
-        except APIConnectionError:
-            display.connection_error(settings)
-            return
-        except httpx.RemoteProtocolError:
-            display.tts_stream_error()
-            if server_manager:
-                display.api_error_with_logs(
-                    "TTS stream interrupted", server_manager.get_all_server_logs()
-                )
-        except openai.AuthenticationError as e:
-            display.auth_error(e.message)
-            return
-        except openai.RateLimitError as e:
-            display.rate_limit_error(e.message)
-        except openai.APIError as e:
-            if server_manager:
-                display.api_error_with_logs(
-                    e.message, server_manager.get_all_server_logs()
-                )
-            else:
-                display.api_error(e.message)
+        await _process_turn(
+            buffer, workflow, pipeline, display, player, settings, server_manager
+        )
 
 
 async def _run_vad(
@@ -91,11 +107,13 @@ async def _run_vad(
 ) -> None:
     workflow, pipeline = create_pipeline(settings, display)
     recorder = VADRecorder(settings, display)
+    player = AudioPlayer()
     display.ready_banner(settings)
     display.listening()
 
     quit_event = asyncio.Event()
     muted = False
+    current_task: asyncio.Task[None] | None = None
 
     async def check_keys() -> None:
         nonlocal muted
@@ -114,60 +132,73 @@ async def _run_vad(
                     recorder.unmute()
                     display.unmuted()
 
-    quit_task = asyncio.create_task(check_keys())
+    # Start background tasks
+    key_task = asyncio.create_task(check_keys())
+    vad_task = asyncio.create_task(recorder.run(quit_event))
 
     try:
         while not quit_event.is_set():
-            segment = await recorder.record_segment(quit_event=quit_event)
+            # Wait for next speech segment from VAD
+            try:
+                segment = await asyncio.wait_for(recorder.segments.get(), timeout=0.5)
+            except TimeoutError:
+                continue
 
             if quit_event.is_set():
                 break
 
-            if len(segment) < settings.sample_rate * 0.3:
-                continue
+            # Interrupt current turn if one is running
+            if current_task and not current_task.done():
+                player.stop()
+                current_task.cancel()
+                try:
+                    await current_task
+                except asyncio.CancelledError:
+                    pass
+                workflow.save_partial_history()
+                display.interrupted()
 
             display.processing(len(segment) / settings.sample_rate)
-            audio_input = AudioInput(buffer=segment)
-            try:
-                turn_start = time.monotonic()
-                workflow.turn_start_time = turn_start
-                result = await pipeline.run(audio_input)
-                recorder.pause()
-                tts_total, tts_first = await play_response(result, display)
-                if settings.show_metrics:
-                    m = workflow.last_metrics
-                    m.tts_seconds = tts_total
-                    m.tts_first_byte_seconds = tts_first
-                    m.total_seconds = time.monotonic() - turn_start
-                    display.metrics(m)
-                recorder.resume()
-                display.listening()
-            except APIConnectionError:
-                display.connection_error(settings)
-                return
-            except httpx.RemoteProtocolError:
-                display.tts_stream_error()
-                if server_manager:
-                    display.api_error_with_logs(
-                        "TTS stream interrupted",
-                        server_manager.get_all_server_logs(),
-                    )
-                recorder.resume()
-                display.listening()
-            except openai.AuthenticationError as e:
-                display.auth_error(e.message)
-                return
-            except openai.RateLimitError as e:
-                display.rate_limit_error(e.message)
-            except openai.APIError as e:
-                if server_manager:
-                    display.api_error_with_logs(
-                        e.message, server_manager.get_all_server_logs()
-                    )
-                else:
-                    display.api_error(e.message)
+
+            # Start new turn as a cancellable task
+            current_task = asyncio.create_task(
+                _process_turn(
+                    segment,
+                    workflow,
+                    pipeline,
+                    display,
+                    player,
+                    settings,
+                    server_manager,
+                )
+            )
+
+            # When the turn completes normally, show listening state
+            current_task.add_done_callback(
+                lambda _t: (
+                    display.listening()
+                    if not quit_event.is_set() and not muted
+                    else None
+                )
+            )
     finally:
-        quit_task.cancel()
+        # Clean up all tasks
+        if current_task and not current_task.done():
+            current_task.cancel()
+            try:
+                await current_task
+            except asyncio.CancelledError:
+                pass
+        key_task.cancel()
+        vad_task.cancel()
+        try:
+            await key_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await vad_task
+        except asyncio.CancelledError:
+            pass
 
 
 async def run(settings: Settings | None = None) -> None:
@@ -191,5 +222,6 @@ async def run(settings: Settings | None = None) -> None:
         else:
             await _run_push_to_talk(settings, display, server_manager)
     finally:
+        display.stop_footer()
         if server_manager:
             server_manager.stop()

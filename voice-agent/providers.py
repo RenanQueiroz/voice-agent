@@ -36,9 +36,11 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         self.show_metrics = show_metrics
         self.last_metrics = TurnMetrics()
         self.turn_start_time: float = 0.0
+        self._partial_response = ""
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
         self.last_metrics = TurnMetrics()
+        self._partial_response = ""
 
         # STT time = time from pipeline.run() start to now (when transcription arrives)
         if self.turn_start_time > 0:
@@ -53,6 +55,7 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         token_count = 0
 
         async for chunk in super().run(transcription):
+            self._partial_response += chunk
             token_count += 1
             if self.show_transcript:
                 self.display.agent_chunk(chunk)
@@ -63,6 +66,19 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
 
         if self.show_transcript:
             self.display.agent_end()
+
+    def save_partial_history(self) -> None:
+        """Save partial LLM response to history on interruption."""
+        if self._partial_response:
+            self._input_history.append(
+                {
+                    "role": "assistant",
+                    "content": self._partial_response + " [interrupted]",
+                }
+            )
+            self._partial_response = ""
+            if self.show_transcript:
+                self.display.agent_end()
 
 
 def create_agent(settings: Settings) -> Agent:

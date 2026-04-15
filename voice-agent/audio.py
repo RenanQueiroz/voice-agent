@@ -5,6 +5,7 @@ import select
 import sys
 import termios
 import threading
+import time
 import tty
 from typing import TYPE_CHECKING
 
@@ -83,8 +84,7 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
 
 
 def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
-    """Downsample 24kHz int16 audio to 16kHz for webrtcvad.
-    Uses simple linear interpolation: take 2 out of every 3 samples."""
+    """Downsample 24kHz int16 audio to 16kHz for webrtcvad."""
     n = len(audio) - (len(audio) % 3)
     trimmed = audio[:n].reshape(-1, 3)
     s0 = trimmed[:, 0]
@@ -95,8 +95,8 @@ def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
 
 
 class VADRecorder:
-    """Continuously listens to the microphone and yields complete speech segments
-    using webrtcvad for voice activity detection."""
+    """Continuously listens to the microphone and pushes complete speech segments
+    to a queue using webrtcvad for voice activity detection."""
 
     def __init__(self, settings: Settings, display: Display):
         import webrtcvad
@@ -108,6 +108,7 @@ class VADRecorder:
         self._energy_threshold = settings.vad_energy_threshold
         self._display = display
         self._stream: sd.InputStream | None = None
+        self.segments: asyncio.Queue[np.ndarray] = asyncio.Queue()
 
     def _open_stream(self) -> sd.InputStream:
         if self._stream is None or self._stream.closed:
@@ -130,32 +131,19 @@ class VADRecorder:
     def unmute(self) -> None:
         self._muted = False
 
-    def pause(self) -> None:
-        """Pause without releasing the mic (used during TTS playback)."""
-        self._muted = True
-
-    def resume(self) -> None:
-        """Resume after pause (reopens mic)."""
-        self._muted = False
-
-    async def record_segment(
-        self, quit_event: asyncio.Event | None = None
-    ) -> np.ndarray:
-        """Block until a complete speech segment is detected. Returns 24kHz int16 buffer.
-        Returns an empty array if quit_event is set."""
+    async def run(self, quit_event: asyncio.Event) -> None:
+        """Continuous background task. Detects speech segments and pushes them to self.segments."""
         frame_duration_ms = 20
         frame_samples = int(self.sample_rate * frame_duration_ms / 1000)
         frame_16k_samples = int(16000 * frame_duration_ms / 1000)
 
-        speech_buffer: list[np.ndarray] = []
-        silence_count = 0
-        is_speaking = False
+        while not quit_event.is_set():
+            # Record one complete speech segment
+            speech_buffer: list[np.ndarray] = []
+            silence_count = 0
+            is_speaking = False
 
-        try:
-            while True:
-                if quit_event and quit_event.is_set():
-                    return np.array([], dtype=np.int16)
-
+            while not quit_event.is_set():
                 if self._muted:
                     self._close_stream()
                     await asyncio.sleep(0.05)
@@ -199,37 +187,60 @@ class VADRecorder:
                     if silence_count >= self.silence_threshold:
                         self._display.vad_clear()
                         break
+
+            # Push completed segment to queue
+            if speech_buffer:
+                segment = np.concatenate(speech_buffer)
+                if len(segment) >= self.sample_rate * 0.3:
+                    await self.segments.put(segment)
+
+        self._close_stream()
+
+
+class AudioPlayer:
+    """Interruptible audio player for TTS output."""
+
+    def __init__(self) -> None:
+        self._player: sd.OutputStream | None = None
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Stop playback immediately (called from outside on interruption)."""
+        self._stopped = True
+        if self._player and not self._player.closed:
+            self._player.stop()
+
+    async def play(self, result, display: Display) -> tuple[float, float]:
+        """Stream TTS audio to speakers.
+        Returns (tts_total_seconds, tts_first_byte_seconds)."""
+        self._stopped = False
+        self._player = sd.OutputStream(
+            samplerate=24000, channels=CHANNELS, dtype=np.int16
+        )
+        self._player.start()
+        tts_start = time.monotonic()
+        first_byte_time = 0.0
+        try:
+            async for event in result.stream():
+                if self._stopped:
+                    break
+                if event.type == "voice_stream_event_audio":
+                    if first_byte_time == 0.0:
+                        first_byte_time = time.monotonic() - tts_start
+                    if not self._stopped:
+                        self._player.write(event.data)
+                elif event.type == "voice_stream_event_lifecycle":
+                    if event.event == "turn_started":
+                        display.turn_started()
+                    elif event.event == "turn_ended":
+                        display.turn_ended()
+                    elif event.event == "session_ended":
+                        display.session_ended()
+                elif event.type == "voice_stream_event_error":
+                    display.api_error(str(event.error))
         finally:
-            self._close_stream()
-
-        return np.concatenate(speech_buffer)
-
-
-async def play_response(result, display: Display) -> tuple[float, float]:
-    """Stream TTS audio response to speakers.
-    Returns (tts_total_seconds, tts_first_byte_seconds)."""
-    import time
-
-    player = sd.OutputStream(samplerate=24000, channels=CHANNELS, dtype=np.int16)
-    player.start()
-    tts_start = time.monotonic()
-    first_byte_time = 0.0
-    try:
-        async for event in result.stream():
-            if event.type == "voice_stream_event_audio":
-                if first_byte_time == 0.0:
-                    first_byte_time = time.monotonic() - tts_start
-                player.write(event.data)
-            elif event.type == "voice_stream_event_lifecycle":
-                if event.event == "turn_started":
-                    display.turn_started()
-                elif event.event == "turn_ended":
-                    display.turn_ended()
-                elif event.event == "session_ended":
-                    display.session_ended()
-            elif event.type == "voice_stream_event_error":
-                display.api_error(str(event.error))
-    finally:
-        player.stop()
-        player.close()
-    return time.monotonic() - tts_start, first_byte_time
+            if not self._player.closed:
+                self._player.stop()
+                self._player.close()
+            self._player = None
+        return time.monotonic() - tts_start, first_byte_time
