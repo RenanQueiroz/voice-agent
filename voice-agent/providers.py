@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.pipeline_config import VoicePipelineConfig
 
 from .config import Settings
+from .display import TurnMetrics
 
 if TYPE_CHECKING:
     from .display import Display
@@ -21,20 +23,43 @@ if TYPE_CHECKING:
 class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
     """Wraps SingleAgentVoiceWorkflow to print transcriptions in real-time."""
 
-    def __init__(self, agent: Agent, display: Display, show_transcript: bool = True):
+    def __init__(
+        self,
+        agent: Agent,
+        display: Display,
+        show_transcript: bool = True,
+        show_metrics: bool = True,
+    ):
         super().__init__(agent)
         self.display = display
         self.show_transcript = show_transcript
+        self.show_metrics = show_metrics
+        self.last_metrics = TurnMetrics()
+        self.turn_start_time: float = 0.0
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
+        self.last_metrics = TurnMetrics()
+
+        # STT time = time from pipeline.run() start to now (when transcription arrives)
+        if self.turn_start_time > 0:
+            self.last_metrics.stt_seconds = time.monotonic() - self.turn_start_time
+
+        stt_display = self.last_metrics.stt_seconds if self.show_metrics else 0.0
         if self.show_transcript:
-            self.display.user_said(transcription)
+            self.display.user_said(transcription, stt_seconds=stt_display)
             self.display.agent_start()
 
+        llm_start = time.monotonic()
+        token_count = 0
+
         async for chunk in super().run(transcription):
+            token_count += 1
             if self.show_transcript:
                 self.display.agent_chunk(chunk)
             yield chunk
+
+        self.last_metrics.llm_seconds = time.monotonic() - llm_start
+        self.last_metrics.llm_tokens = token_count
 
         if self.show_transcript:
             self.display.agent_end()
@@ -82,7 +107,10 @@ def create_pipeline(
 ) -> tuple[TranscriptVoiceWorkflow, VoicePipeline]:
     agent = create_agent(settings)
     workflow = TranscriptVoiceWorkflow(
-        agent, display=display, show_transcript=settings.show_transcript
+        agent,
+        display=display,
+        show_transcript=settings.show_transcript,
+        show_metrics=settings.show_metrics,
     )
     config = create_pipeline_config(settings)
     pipeline = VoicePipeline(

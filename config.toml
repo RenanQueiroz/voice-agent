@@ -31,6 +31,8 @@ energy_threshold = 40
 [display]
 # Show real-time transcription of user speech and agent response in the console.
 show_transcript = true
+# Show performance metrics (STT, LLM, TTS timing) after each response.
+show_metrics = true
 
 [agent]
 instructions = "You are a helpful voice assistant. Be concise and conversational."

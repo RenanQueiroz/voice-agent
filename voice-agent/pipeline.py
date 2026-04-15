@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import httpx
@@ -50,8 +51,16 @@ async def _run_push_to_talk(
         display.processing(len(buffer) / settings.sample_rate)
         audio_input = AudioInput(buffer=buffer)
         try:
+            turn_start = time.monotonic()
+            workflow.turn_start_time = turn_start
             result = await pipeline.run(audio_input)
-            await play_response(result, display)
+            tts_total, tts_first = await play_response(result, display)
+            if settings.show_metrics:
+                m = workflow.last_metrics
+                m.tts_seconds = tts_total
+                m.tts_first_byte_seconds = tts_first
+                m.total_seconds = time.monotonic() - turn_start
+                display.metrics(m)
         except APIConnectionError:
             display.connection_error(settings)
             return
@@ -110,9 +119,17 @@ async def _run_vad(
             display.processing(len(segment) / settings.sample_rate)
             audio_input = AudioInput(buffer=segment)
             try:
+                turn_start = time.monotonic()
+                workflow.turn_start_time = turn_start
                 result = await pipeline.run(audio_input)
                 recorder.pause()
-                await play_response(result, display)
+                tts_total, tts_first = await play_response(result, display)
+                if settings.show_metrics:
+                    m = workflow.last_metrics
+                    m.tts_seconds = tts_total
+                    m.tts_first_byte_seconds = tts_first
+                    m.total_seconds = time.monotonic() - turn_start
+                    display.metrics(m)
                 recorder.resume()
                 display.listening()
             except APIConnectionError:

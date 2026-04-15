@@ -183,13 +183,20 @@ class VADRecorder:
         return np.concatenate(speech_buffer)
 
 
-async def play_response(result, display: Display) -> None:
-    """Stream TTS audio response to speakers."""
+async def play_response(result, display: Display) -> tuple[float, float]:
+    """Stream TTS audio response to speakers.
+    Returns (tts_total_seconds, tts_first_byte_seconds)."""
+    import time
+
     player = sd.OutputStream(samplerate=24000, channels=CHANNELS, dtype=np.int16)
     player.start()
+    tts_start = time.monotonic()
+    first_byte_time = 0.0
     try:
         async for event in result.stream():
             if event.type == "voice_stream_event_audio":
+                if first_byte_time == 0.0:
+                    first_byte_time = time.monotonic() - tts_start
                 player.write(event.data)
             elif event.type == "voice_stream_event_lifecycle":
                 if event.event == "turn_started":
@@ -203,3 +210,4 @@ async def play_response(result, display: Display) -> None:
     finally:
         player.stop()
         player.close()
+    return time.monotonic() - tts_start, first_byte_time

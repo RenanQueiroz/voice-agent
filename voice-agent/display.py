@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.console import Console
@@ -13,6 +14,22 @@ if TYPE_CHECKING:
     from .config import Settings
 
 console = Console()
+
+
+@dataclass
+class TurnMetrics:
+    """Timing metrics for a single conversation turn."""
+
+    stt_seconds: float = 0.0
+    llm_seconds: float = 0.0
+    llm_tokens: int = 0
+    tts_seconds: float = 0.0
+    tts_first_byte_seconds: float = 0.0
+    total_seconds: float = 0.0
+
+    @property
+    def llm_tokens_per_sec(self) -> float:
+        return self.llm_tokens / self.llm_seconds if self.llm_seconds > 0 else 0.0
 
 
 class Display:
@@ -80,16 +97,9 @@ class Display:
     def ready_banner(self, settings: Settings) -> None:
         mode = settings.voice_mode
         input_mode = settings.input_mode.replace("_", " ")
-        llm = (
-            settings.llm_model.split("/")[-1]
-            if "/" in settings.llm_model
-            else settings.llm_model
-        )
-        tts = (
-            settings.tts_model.split("/")[-1]
-            if "/" in settings.tts_model
-            else settings.tts_model
-        )
+
+        def _short(model: str) -> str:
+            return model.split("/")[-1] if "/" in model else model
 
         info = Text()
         info.append("Mode: ", style="dim")
@@ -101,11 +111,14 @@ class Display:
         info.append("Q", style="bold yellow")
         info.append(" to quit", style="dim")
         info.append("\n")
+        info.append("STT: ", style="dim")
+        info.append(_short(settings.stt_model), style="cyan")
+        info.append("  │  ", style="dim")
         info.append("LLM: ", style="dim")
-        info.append(llm, style="cyan")
+        info.append(_short(settings.llm_model), style="cyan")
         info.append("  │  ", style="dim")
         info.append("TTS: ", style="dim")
-        info.append(tts, style="cyan")
+        info.append(_short(settings.tts_model), style="cyan")
 
         self.console.print(
             Panel(info, title="[bold]Voice Agent[/]", border_style="blue")
@@ -148,12 +161,14 @@ class Display:
 
     # ── Transcription ────────────────────────────────────────
 
-    def user_said(self, text: str) -> None:
+    def user_said(self, text: str, stt_seconds: float = 0.0) -> None:
         self.console.print(f"\n  [bold cyan]You:[/] {text}")
+        if stt_seconds > 0:
+            self.console.print(f"  [dim]STT {stt_seconds:.1f}s[/]")
 
     def agent_start(self) -> None:
         self._agent_streaming = True
-        sys.stdout.write("  \033[1;35mAgent:\033[0m ")
+        sys.stdout.write("\n  \033[1;35mAgent:\033[0m ")
         sys.stdout.flush()
 
     def agent_chunk(self, text: str) -> None:
@@ -162,9 +177,22 @@ class Display:
 
     def agent_end(self) -> None:
         if self._agent_streaming:
-            sys.stdout.write("\n\n")
+            sys.stdout.write("\n")
             sys.stdout.flush()
             self._agent_streaming = False
+
+    # ── Metrics ──────────────────────────────────────────────
+
+    def metrics(self, m: TurnMetrics) -> None:
+        parts: list[str] = []
+        if m.llm_seconds > 0:
+            tok_s = f" ({m.llm_tokens_per_sec:.0f} tok/s)" if m.llm_tokens > 0 else ""
+            parts.append(f"LLM {m.llm_seconds:.1f}s{tok_s}")
+        if m.tts_seconds > 0:
+            parts.append(f"TTS {m.tts_seconds:.1f}s")
+        if m.total_seconds > 0:
+            parts.append(f"Total {m.total_seconds:.1f}s")
+        self.console.print(f"  [dim]{' │ '.join(parts)}[/]\n")
 
     # ── Lifecycle (no longer shown to user) ──────────────────
 

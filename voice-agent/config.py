@@ -70,6 +70,7 @@ class Settings:
 
     # Display
     show_transcript: bool
+    show_metrics: bool
 
     # Audio
     sample_rate: int
@@ -152,6 +153,10 @@ def load_settings() -> Settings:
         ),
         show_transcript=_get(
             "SHOW_TRANSCRIPT", t.get("display", {}).get("show_transcript"), "true"
+        ).lower()
+        == "true",
+        show_metrics=_get(
+            "SHOW_METRICS", t.get("display", {}).get("show_metrics"), "true"
         ).lower()
         == "true",
         sample_rate=int(_get("SAMPLE_RATE", audio.get("sample_rate"), "24000")),
