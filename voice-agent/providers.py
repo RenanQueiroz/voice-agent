@@ -4,7 +4,7 @@ import os
 import platform
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -22,6 +22,9 @@ from agents.voice.utils import get_sentence_based_splitter
 
 from .config import Settings
 from .display import TurnMetrics
+
+# Minimum character count before text is sent to TTS (matches SDK's _add_text threshold)
+_MIN_TTS_CHARS = 20
 
 if TYPE_CHECKING:
     from .display import Display
@@ -54,11 +57,13 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         display: Display,
         show_transcript: bool = True,
         show_metrics: bool = True,
+        tool_call_filler: str | None = None,
     ):
         super().__init__(agent)
         self.display = display
         self.show_transcript = show_transcript
         self.show_metrics = show_metrics
+        self.tool_call_filler = tool_call_filler
         self.last_metrics = TurnMetrics()
         self.turn_start_time: float = 0.0
         self._partial_response = ""
@@ -82,11 +87,25 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         llm_start = time.monotonic()
         token_count = 0
         agent_started = False
+        filler_sent = False
 
         # Run the agent and intercept all events (tool calls + text)
         result = Runner.run_streamed(self._current_agent, self._input_history)
         async for event in result.stream_events():
             if event.type == "run_item_stream_event" and event.name == "tool_called":
+                # If the model didn't generate any text before the tool call,
+                # yield a static filler phrase so the user hears something
+                if self.tool_call_filler and not filler_sent and not agent_started:
+                    filler_sent = True
+                    if self.show_transcript:
+                        self.display.agent_start()
+                        self.display.agent_chunk(self.tool_call_filler)
+                        self.display.agent_end()
+                    yield self.tool_call_filler + " "
+                elif agent_started and self.show_transcript:
+                    # End current agent block before showing tool info
+                    self.display.agent_end()
+                agent_started = False
                 if self.show_transcript:
                     tool_name = getattr(event.item.raw_item, "name", "tool")
                     tool_args = getattr(event.item.raw_item, "arguments", "")
@@ -196,6 +215,36 @@ def _expand_instructions(text: str) -> str:
     return text
 
 
+def _eager_sentence_splitter(
+    min_length: int = _MIN_TTS_CHARS,
+) -> Callable[[str], tuple[str, str]]:
+    """Sentence splitter that sends complete sentences to TTS immediately.
+
+    The SDK's default splitter always holds back the last sentence, waiting for a
+    second one before releasing the first.  This means pre-tool-call text like
+    "Let me look that up." sits in the buffer until the model's response arrives
+    after the tool finishes — defeating the purpose of speaking while waiting.
+
+    This wrapper adds one rule: if the buffer is a single complete sentence
+    (ends with sentence-ending punctuation and meets the length threshold),
+    send it to TTS right away.
+    """
+    base = get_sentence_based_splitter(min_sentence_length=min_length)
+
+    def splitter(text_buffer: str) -> tuple[str, str]:
+        # Default: returns all-but-last sentence when there are multiple
+        combined, remaining = base(text_buffer)
+        if combined:
+            return combined, remaining
+        # Single complete sentence — send it immediately
+        stripped = text_buffer.strip()
+        if stripped and stripped[-1] in ".!?" and len(stripped) >= min_length:
+            return stripped, ""
+        return "", text_buffer
+
+    return splitter
+
+
 def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
     if settings.voice_mode == "local":
         provider = OpenAIVoiceModelProvider(
@@ -209,8 +258,7 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
         model_provider=provider,
         tts_settings=TTSModelSettings(
             voice=settings.tts_voice if settings.tts_voice else None,  # type: ignore[arg-type]
-            # Lower the sentence buffer so TTS starts sooner
-            text_splitter=get_sentence_based_splitter(min_sentence_length=10),
+            text_splitter=_eager_sentence_splitter(),
         ),
         tracing_disabled=True,
     )
@@ -227,6 +275,7 @@ def create_pipeline(
         display=display,
         show_transcript=settings.show_transcript,
         show_metrics=settings.show_metrics,
+        tool_call_filler=settings.tool_call_filler,
     )
     config = create_pipeline_config(settings)
 

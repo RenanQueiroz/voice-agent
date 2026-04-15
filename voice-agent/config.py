@@ -84,6 +84,7 @@ class Settings:
 
     # Agent
     agent_instructions: str
+    tool_call_filler: str | None
 
     # VAD
     vad_aggressiveness: int
@@ -194,6 +195,9 @@ def load_settings() -> Settings:
         local_tts_voice=_get_optional("LOCAL_TTS_VOICE", local.get("tts_voice")),
         # Required settings
         agent_instructions=_get("AGENT_INSTRUCTIONS", agent.get("instructions")),
+        tool_call_filler=_get_optional(
+            "TOOL_CALL_FILLER", agent.get("tool_call_filler")
+        ),
         vad_aggressiveness=int(_get("VAD_AGGRESSIVENESS", vad.get("aggressiveness"))),
         vad_silence_ms=int(_get("VAD_SILENCE_MS", vad.get("silence_ms"))),
         vad_energy_threshold=int(

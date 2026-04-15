@@ -28,8 +28,8 @@ kv_quant_scheme = "turboquant"
 llm_model = "mlx-community/gemma-3-4b-it-4bit"
 
 [local.llamacpp]
-#llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
-llm_model = "gpt-oss-20b-low"
+llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
+#lllm_model = "gpt-oss-20b-low"
 preset = "models.ini"            # path to llama-server --models-preset INI file
 
 [vad]
@@ -57,7 +57,14 @@ Your output is read aloud by a TTS model. Never use formatting that cannot be sp
 no bullet points, no numbered lists, no asterisks, no bold/italic, no markdown, no emojis, no headers.
 Use plain sentences only. When listing things, say them in a natural sentence.
 If you don't know the answer, say you don't know.
+
+IMPORTANT: Before calling a tool, say a short sentence about what you're about to do. 
+Tool calls can take a while to run, so we need to give the user some feedback before they need to wait. 
+For example, say "Let me check that for you" before a search tool call, or "I'll pull up the calendar" before a calendar tool call.
 """
+
+# Phrase spoken while waiting for tool calls as fallback if the model hasn't generated any text. Leave empty to disable.
+tool_call_filler = "Give me just a moment."
 
 # Model-specific instruction snippets. Keys are substring patterns matched against
 # active model names (STT, TTS, LLM). Matching snippets are appended to instructions.
