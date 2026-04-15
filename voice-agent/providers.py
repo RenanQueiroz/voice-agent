@@ -11,13 +11,33 @@ from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 from agents.voice.model import TTSModelSettings
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
+from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
+from agents.voice.utils import get_sentence_based_splitter
 
 from .config import Settings
 from .display import TurnMetrics
 
 if TYPE_CHECKING:
     from .display import Display
+
+
+class StreamingTTSModel(OpenAITTSModel):
+    """TTS model that requests server-side streaming from mlx-audio."""
+
+    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        response = self._client.audio.speech.with_streaming_response.create(
+            model=self.model,
+            voice=settings.voice or "af_heart",
+            input=text,
+            response_format="pcm",
+            extra_body={
+                "stream": True,
+            },
+        )
+        async with response as stream:
+            async for chunk in stream.iter_bytes(chunk_size=1024):
+                yield chunk
 
 
 class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
@@ -112,7 +132,11 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
 
     return VoicePipelineConfig(
         model_provider=provider,
-        tts_settings=TTSModelSettings(voice=settings.tts_voice),  # type: ignore[arg-type]
+        tts_settings=TTSModelSettings(
+            voice=settings.tts_voice,  # type: ignore[arg-type]
+            # Lower the sentence buffer so TTS starts sooner
+            text_splitter=get_sentence_based_splitter(min_sentence_length=10),
+        ),
         tracing_disabled=True,
     )
 
@@ -129,10 +153,23 @@ def create_pipeline(
         show_metrics=settings.show_metrics,
     )
     config = create_pipeline_config(settings)
+
+    # For local mode, use StreamingTTSModel for server-side streaming
+    tts_model: str | StreamingTTSModel = settings.tts_model
+    if settings.voice_mode == "local":
+        tts_client = AsyncOpenAI(
+            base_url=f"{settings.mlx_audio_url}/v1",
+            api_key="not-needed",
+        )
+        tts_model = StreamingTTSModel(
+            model=settings.tts_model,
+            openai_client=tts_client,
+        )
+
     pipeline = VoicePipeline(
         workflow=workflow,
         stt_model=settings.stt_model,
-        tts_model=settings.tts_model,
+        tts_model=tts_model,
         config=config,
     )
     return workflow, pipeline
