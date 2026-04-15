@@ -10,8 +10,9 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 - **Push-to-talk**: Alternative manual recording mode
 - **Interruption**: Press Space to interrupt the agent mid-response
 - **Mute**: Press M to toggle microphone on/off (fully releases the mic)
+- **MCP support**: Connect MCP servers to give the agent tools (search, file access, APIs, etc.)
 - **Auto-setup**: Local mode automatically installs dependencies, patches compatibility issues, downloads models, and starts servers
-- **Persistent TUI**: Rich-based footer showing state, models, controls, and metrics
+- **Persistent TUI**: Rich-based footer showing state, models, tools, controls, and metrics
 - **Performance metrics**: STT, LLM (tokens/sec), and TTS timing after each turn
 - **Conversation history**: Partial responses are preserved when interrupted
 
@@ -20,7 +21,7 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 - **macOS** with Apple Silicon (M1/M2/M3/M4) for local mode
 - **Python 3.14+**
 - **[uv](https://docs.astral.sh/uv/)** package manager
-- **espeak-ng** (installed automatically via Homebrew for local TTS)
+- **espeak-ng** (installed automatically via Homebrew for local TTS models that need it)
 - An **OpenAI API key** for cloud mode
 
 ## Quick Start
@@ -30,7 +31,13 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 ```bash
 git clone <repo-url>
 cd voice-agent
-uv sync
+./setup.sh
+```
+
+Or manually:
+
+```bash
+uv sync --extra local
 ```
 
 ### 2. Configure
@@ -50,6 +57,12 @@ OPENAI_API_KEY=sk-...
 ```
 
 ### 3. Run
+
+```bash
+./start.sh
+```
+
+Or:
 
 ```bash
 uv run python -m voice-agent
@@ -99,13 +112,13 @@ input_mode = "vad"          # "vad" or "push_to_talk"
 stt_model = "gpt-4o-transcribe"
 tts_model = "gpt-4o-mini-tts"
 llm_model = "gpt-4o-mini"
-tts_voice = "alloy"
+tts_voice = "alloy"         # optional
 
 [local]
 stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
 tts_model = "mlx-community/Kokoro-82M-bf16"
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
-tts_voice = "af_heart"
+tts_voice = "af_heart"      # optional, some models don't need one
 audio_url = "http://localhost:8000"
 vlm_url = "http://localhost:8080"
 
@@ -145,14 +158,51 @@ deps = ["misaki", "num2words", "spacy", "phonemizer", "espeakng-loader"]
 brew = ["espeak-ng"]
 ```
 
+## MCP Servers (Tools)
+
+The agent can use [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) servers to access external tools like search, file access, APIs, etc.
+
+### Setup
+
+```bash
+cp mcp_servers.toml.example mcp_servers.toml
+```
+
+Edit `mcp_servers.toml` to add your servers:
+
+```toml
+# Stdio server (runs a local command)
+[filesystem]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+cache_tools = true
+
+# HTTP server (connects to a running server)
+[my-api]
+type = "http"
+url = "http://localhost:3000/mcp"
+```
+
+Use `${VAR_NAME}` to reference secrets from `.env`:
+
+```toml
+[search]
+type = "http"
+url = "http://localhost:3000/mcp"
+env = { API_KEY = "${MY_SECRET_KEY}" }
+```
+
+`mcp_servers.toml` is gitignored so your server configurations stay private. Tool calls and results are shown in the conversation transcript.
+
 ## Architecture
 
 ```
-User speaks → Mic (24kHz) → VAD (webrtcvad) → Speech segment
-    → STT (whisper) → Text transcription
-    → LLM (gemma/gpt) → Response text (streamed)
-    → TTS (kokoro/openai) → Audio (streamed)
-    → Speaker playback
+User speaks -> Mic (24kHz) -> VAD (webrtcvad) -> Speech segment
+    -> STT (whisper) -> Text transcription
+    -> LLM (gemma/gpt) -> [Tool calls] -> Response text (streamed)
+    -> TTS (kokoro/openai) -> Audio (streamed)
+    -> Speaker playback
 ```
 
 ### Package Structure
@@ -161,12 +211,13 @@ User speaks → Mic (24kHz) → VAD (webrtcvad) → Speech segment
 voice-agent/
   __init__.py
   __main__.py       # Entry point
-  config.py         # Settings from config.toml + .env
+  config.py         # Settings from config.toml + .env, validation
   audio.py          # VADRecorder, AudioPlayer, mic/speaker I/O
   display.py        # Rich TUI with persistent footer
   pipeline.py       # Async conversation loop with interruption
   providers.py      # Model providers, streaming TTS, transcript workflow
   servers.py        # Local mlx-audio/mlx-vlm server lifecycle
+  mcp.py            # MCP server loading from mcp_servers.toml
 ```
 
 ### Key Design Decisions
@@ -175,6 +226,15 @@ voice-agent/
 - **VAD with pre-roll**: A 100ms ring buffer captures audio before speech onset, preventing clipped words. Speech requires 3 consecutive frames (60ms) to confirm, filtering transient noise.
 - **Echo suppression**: The mic is muted during agent response to prevent the agent from hearing its own voice through speakers. Press Space to interrupt instead.
 - **Streaming**: LLM tokens stream via SSE, TTS audio streams via chunked HTTP (`stream=True`), and the SDK's sentence splitter sends text to TTS at sentence boundaries rather than waiting for the full response.
+- **Tool visibility**: MCP tool calls and results are displayed in the conversation transcript so the user can see what the agent is doing.
+
+## Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `./start.sh` | Run the voice agent |
+| `./setup.sh` | Install all dependencies (core + local) |
+| `./setup.sh --update` | Update all dependencies to latest versions |
 
 ## Development
 
