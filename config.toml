@@ -9,7 +9,7 @@ llm_model = "gpt-4o-mini"
 tts_voice = "alloy"
 
 [local]
-stt_model = "mlx-community/whisper-large-v3-turbo-asr-fp16"
+stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
 tts_model = "mlx-community/Kokoro-82M-bf16"
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
 tts_voice = "af_heart"
@@ -26,7 +26,7 @@ silence_ms = 500
 # Minimum RMS energy to count a frame as speech (even if webrtcvad says yes).
 # Filters out low-level ambient noise. Run debug_vad.py to calibrate for your mic.
 # Typical: ambient ~10, speech 50-500+.
-energy_threshold = 40
+energy_threshold = 60
 
 [display]
 # Show real-time transcription of user speech and agent response in the console.

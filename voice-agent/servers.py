@@ -120,7 +120,7 @@ class ServerManager:
     def _ensure_system_deps(self) -> bool:
         """Install system-level (brew) dependencies if missing."""
         missing: list[str] = []
-        for model in [self.settings.local_tts_model, self.settings.local_stt_model]:
+        for model in [self.settings.tts_model, self.settings.stt_model]:
             for pkg in self._brew_for_model(model):
                 if not shutil.which(pkg):
                     missing.append(pkg)
@@ -166,7 +166,7 @@ class ServerManager:
         except ImportError:
             packages.append("mlx-vlm")
 
-        for model in [self.settings.local_tts_model, self.settings.local_stt_model]:
+        for model in [self.settings.tts_model, self.settings.stt_model]:
             for dep in self._deps_for_model(model):
                 import_name = (
                     dep.split("<")[0].split(">")[0].split("=")[0].split("!")[0]
@@ -261,8 +261,12 @@ class ServerManager:
     async def start(self) -> bool:
         """Start both servers and wait for them to be healthy. Returns True if ready."""
         s = self.settings
-        audio_port = self._parse_port(s.mlx_audio_url)
-        vlm_port = self._parse_port(s.mlx_vlm_url)
+        assert s.mlx_audio_url is not None  # validated in load_settings
+        assert s.mlx_vlm_url is not None
+        audio_url = s.mlx_audio_url
+        vlm_url = s.mlx_vlm_url
+        audio_port = self._parse_port(audio_url)
+        vlm_port = self._parse_port(vlm_url)
 
         self.display.server_setup_start()
 
@@ -298,8 +302,8 @@ class ServerManager:
         )
 
         audio_ok, vlm_ok = await asyncio.gather(
-            self._wait_for_health(s.mlx_audio_url, "mlx-audio", audio_proc),
-            self._wait_for_health(s.mlx_vlm_url, "mlx-vlm", vlm_proc),
+            self._wait_for_health(audio_url, "mlx-audio", audio_proc),
+            self._wait_for_health(vlm_url, "mlx-vlm", vlm_proc),
         )
 
         if audio_ok and vlm_ok:

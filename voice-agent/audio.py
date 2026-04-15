@@ -137,9 +137,16 @@ class VADRecorder:
         frame_samples = int(self.sample_rate * frame_duration_ms / 1000)
         frame_16k_samples = int(16000 * frame_duration_ms / 1000)
 
+        # Require this many consecutive speech frames before we start buffering.
+        # Filters out transient noises like key clicks, mouse scrolls.
+        # 8 frames = 160ms -- long enough to reject most mechanical noises.
+        speech_start_threshold = 8
+
         while not quit_event.is_set():
             # Record one complete speech segment
             speech_buffer: list[np.ndarray] = []
+            pending_frames: list[np.ndarray] = []
+            speech_frame_count = 0
             silence_count = 0
             is_speaking = False
 
@@ -164,34 +171,41 @@ class VADRecorder:
                 vad_says_speech = self.vad.is_speech(frame_16k.tobytes(), 16000)
                 is_speech = vad_says_speech and rms > self._energy_threshold
 
-                # Live status indicator
-                if is_speaking:
+                if not is_speaking:
+                    if is_speech:
+                        pending_frames.append(frame_24k)
+                        speech_frame_count += 1
+                        if speech_frame_count >= speech_start_threshold:
+                            # Confirmed speech -- promote pending frames
+                            is_speaking = True
+                            speech_buffer.extend(pending_frames)
+                            pending_frames.clear()
+                            self._display.vad_speaking(rms)
+                    else:
+                        # Reset -- noise was transient
+                        speech_frame_count = 0
+                        pending_frames.clear()
+                else:
+                    # Already speaking
                     remaining_ms = (
                         self.silence_threshold - silence_count
                     ) * frame_duration_ms
                     if is_speech:
+                        speech_buffer.append(frame_24k)
+                        silence_count = 0
                         self._display.vad_speaking(rms)
                     else:
+                        speech_buffer.append(frame_24k)
+                        silence_count += 1
                         self._display.vad_silence(remaining_ms)
-                elif is_speech:
-                    self._display.vad_speaking(rms)
-
-                if is_speech:
-                    speech_buffer.append(frame_24k)
-                    silence_count = 0
-                    if not is_speaking:
-                        is_speaking = True
-                elif is_speaking:
-                    speech_buffer.append(frame_24k)
-                    silence_count += 1
-                    if silence_count >= self.silence_threshold:
-                        self._display.vad_clear()
-                        break
+                        if silence_count >= self.silence_threshold:
+                            self._display.vad_clear()
+                            break
 
             # Push completed segment to queue
             if speech_buffer:
                 segment = np.concatenate(speech_buffer)
-                if len(segment) >= self.sample_rate * 0.3:
+                if len(segment) >= self.sample_rate * 0.5:
                     await self.segments.put(segment)
 
         self._close_stream()
