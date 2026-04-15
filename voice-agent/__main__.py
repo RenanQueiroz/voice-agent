@@ -2,6 +2,7 @@ import asyncio
 
 from .audio import _restore_terminal
 from .config import load_settings
+from .display import Display
 from .pipeline import run
 
 
@@ -10,7 +11,7 @@ def main() -> None:
     try:
         asyncio.run(run(settings))
     except KeyboardInterrupt:
-        print("\nGoodbye!")
+        Display().goodbye()
     finally:
         _restore_terminal()
 

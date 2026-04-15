@@ -9,11 +9,15 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import Settings
+
+if TYPE_CHECKING:
+    from .display import Display
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -25,8 +29,9 @@ _LOG_DIR = _PROJECT_ROOT / "logs"
 class ServerManager:
     """Starts, health-checks, and stops local mlx-audio and mlx-vlm servers."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, display: Display):
         self.settings = settings
+        self.display = display
         self._processes: list[subprocess.Popen[str]] = []
         self._log_files: list[tuple[str, Path]] = []
 
@@ -35,12 +40,12 @@ class ServerManager:
         return parsed.port or 8000
 
     def _start_process(self, cmd: list[str], name: str) -> subprocess.Popen[str]:
-        print(f"  Starting {name}...")
+        self.display.server_starting(name)
         _LOG_DIR.mkdir(exist_ok=True)
         log_path = (
             _LOG_DIR / f"{name.replace(' ', '_').replace('(', '').replace(')', '')}.log"
         )
-        log_file = open(log_path, "w")
+        log_file = open(log_path, "w")  # noqa: SIM115
         proc = subprocess.Popen(
             cmd,
             stdout=log_file,
@@ -58,32 +63,32 @@ class ServerManager:
         health_url = f"{url}/v1/models"
         elapsed = 0.0
         interval = 2.0
-        last_msg = ""
+        last_elapsed = -1
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             while elapsed < STARTUP_TIMEOUT:
-                # Check if the process died
                 if proc.poll() is not None:
-                    print(f"\n  {name} exited unexpectedly (code {proc.returncode}):")
-                    self._print_log_tail(name)
+                    log_lines = self._get_log_tail(name)
+                    self.display.server_failed(name, log_lines)
                     return False
 
                 try:
                     resp = await client.get(health_url)
                     if resp.status_code == 200:
+                        self.display.server_ready_one(name)
                         return True
                 except httpx.ConnectError:
-                    msg = f"  Waiting for {name}... ({int(elapsed)}s)"
-                    if msg != last_msg:
-                        print(msg)
-                        last_msg = msg
+                    t = int(elapsed)
+                    if t != last_elapsed:
+                        self.display.server_waiting(name, t)
+                        last_elapsed = t
                 except httpx.ReadTimeout:
                     pass
 
                 await asyncio.sleep(interval)
                 elapsed += interval
 
-        print(f"\n  {name} did not become ready within {STARTUP_TIMEOUT}s")
+        self.display.server_timeout(name, STARTUP_TIMEOUT)
         return False
 
     def _load_model_deps(self) -> dict[str, dict]:
@@ -124,23 +129,25 @@ class ServerManager:
             return True
 
         if not shutil.which("brew"):
-            print(f"  Missing system packages: {', '.join(missing)}")
-            print("  Install them manually (Homebrew not found).")
+            self.display.server_install_failed(
+                [
+                    f"Missing system packages: {', '.join(missing)}",
+                    "Install them manually (Homebrew not found).",
+                ]
+            )
             return False
 
-        print(f"  Installing system packages: {', '.join(missing)}...")
+        self.display.server_installing_system(missing)
         result = subprocess.run(
             ["brew", "install", *missing],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
-            print("  Failed to install system packages:")
-            for line in result.stderr.strip().splitlines()[-10:]:
-                print(f"    {line}")
+            self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
             return False
 
-        print("  System packages installed.")
+        self.display.server_installed()
         return True
 
     def _ensure_packages(self) -> bool:
@@ -159,10 +166,8 @@ class ServerManager:
         except ImportError:
             packages.append("mlx-vlm")
 
-        # Model-specific dependencies
         for model in [self.settings.local_tts_model, self.settings.local_stt_model]:
             for dep in self._deps_for_model(model):
-                # Strip version specifiers for the import check (e.g. "misaki<0.9.4" -> "misaki")
                 import_name = (
                     dep.split("<")[0].split(">")[0].split("=")[0].split("!")[0]
                 )
@@ -175,31 +180,21 @@ class ServerManager:
         if not packages:
             return True
 
-        print(f"  Installing {', '.join(packages)}...")
+        self.display.server_installing(packages)
         result = subprocess.run(
             ["uv", "pip", "install", *packages],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
-            print("  Failed to install packages:")
-            for line in result.stderr.strip().splitlines()[-10:]:
-                print(f"    {line}")
+            self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
             return False
 
-        print("  Installed successfully.")
-        self._apply_patches()
-        print()
+        self.display.server_installed()
         return True
 
     def _apply_patches(self) -> None:
         """Fix known compatibility issues in installed packages."""
-        # See: https://github.com/Blaizzy/mlx-audio/issues/648
-        # Issues in misaki/espeak.py:
-        # 1. EspeakWrapper.set_data_path() removed in phonemizer 3.3
-        # 2. espeakng_loader.get_data_path() returns broken CI build path
-        # 3. espeakng_loader.get_library_path() loads a dylib with hardcoded
-        #    broken paths -- must use system espeak-ng instead
         try:
             import misaki
 
@@ -210,7 +205,6 @@ class ServerManager:
             content = espeak_py.read_text()
             patched = content
 
-            # Find system espeak-ng paths (brew on macOS, standard on Linux)
             for data_candidate in [
                 Path("/opt/homebrew/share/espeak-ng-data"),
                 Path("/usr/share/espeak-ng-data"),
@@ -231,14 +225,12 @@ class ServerManager:
             else:
                 sys_lib = None
 
-            # Patch the library path (broken dylib from espeakng_loader pip package)
             if sys_lib:
                 patched = patched.replace(
                     "EspeakWrapper.set_library(espeakng_loader.get_library_path())",
                     f'EspeakWrapper.set_library("{sys_lib}")',
                 )
 
-            # Patch the data path (broken CI build path from espeakng_loader)
             if sys_data:
                 for old in [
                     "EspeakWrapper.set_data_path(espeakng_loader.get_data_path())",
@@ -256,12 +248,13 @@ class ServerManager:
 
             if patched != content:
                 espeak_py.write_text(patched)
-                # Clear stale bytecode cache so the server picks up the patch
                 pycache = espeak_py.parent / "__pycache__"
                 if pycache.exists():
                     for pyc in pycache.glob("espeak*"):
                         pyc.unlink()
-                print("  Patched misaki/espeak.py for system espeak-ng compatibility.")
+                self.display.server_patched(
+                    "Patched misaki/espeak.py for system espeak-ng"
+                )
         except Exception:
             pass
 
@@ -271,13 +264,12 @@ class ServerManager:
         audio_port = self._parse_port(s.mlx_audio_url)
         vlm_port = self._parse_port(s.mlx_vlm_url)
 
-        print("Setting up local servers...\n")
+        self.display.server_setup_start()
 
         if not self._ensure_packages():
             return False
 
         self._apply_patches()
-        print("  Starting servers (first run may download models)...\n")
 
         audio_proc = self._start_process(
             [
@@ -305,33 +297,31 @@ class ServerManager:
             f"mlx-vlm (port {vlm_port})",
         )
 
-        # Wait for both in parallel
         audio_ok, vlm_ok = await asyncio.gather(
             self._wait_for_health(s.mlx_audio_url, "mlx-audio", audio_proc),
             self._wait_for_health(s.mlx_vlm_url, "mlx-vlm", vlm_proc),
         )
 
         if audio_ok and vlm_ok:
-            print("\n  All servers ready.\n")
+            self.display.server_all_ready()
             return True
 
         self.stop()
         return False
 
-    def _print_log_tail(self, name: str, lines: int = 15) -> None:
+    def _get_log_tail(self, name: str, lines: int = 15) -> list[str]:
         for log_name, log_path in self._log_files:
             if name in log_name and log_path.exists():
-                tail = log_path.read_text().strip().splitlines()[-lines:]
-                for line in tail:
-                    print(f"    {line}")
-                break
+                return log_path.read_text().strip().splitlines()[-lines:]
+        return []
 
-    def print_server_logs(self) -> None:
-        """Print recent server logs -- useful when debugging API errors."""
+    def get_all_server_logs(self) -> dict[str, list[str]]:
+        """Return recent logs from all servers."""
+        logs: dict[str, list[str]] = {}
         for name, log_path in self._log_files:
             if log_path.exists():
-                print(f"\n  -- {name} logs (last 15 lines):")
-                self._print_log_tail(name)
+                logs[name] = log_path.read_text().strip().splitlines()[-15:]
+        return logs
 
     def stop(self) -> None:
         """Terminate all managed server processes."""

@@ -4,13 +4,17 @@ import asyncio
 import select
 import sys
 import termios
-import tty
 import threading
+import tty
+from typing import TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
 
 from .config import Settings
+
+if TYPE_CHECKING:
+    from .display import Display
 
 CHANNELS = 1
 
@@ -71,9 +75,6 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
         stream.stop()
         stream.close()
 
-    stream.stop()
-    stream.close()
-
     if pressed == "q":
         raise KeyboardInterrupt
 
@@ -84,10 +85,8 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
 def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
     """Downsample 24kHz int16 audio to 16kHz for webrtcvad.
     Uses simple linear interpolation: take 2 out of every 3 samples."""
-    # Reshape into groups of 3, average pairs to get 2 samples per group
     n = len(audio) - (len(audio) % 3)
     trimmed = audio[:n].reshape(-1, 3)
-    # Take samples at positions 0 and 1.5 (average of 1 and 2)
     s0 = trimmed[:, 0]
     s1 = (
         (trimmed[:, 1].astype(np.int32) + trimmed[:, 2].astype(np.int32)) // 2
@@ -99,16 +98,16 @@ class VADRecorder:
     """Continuously listens to the microphone and yields complete speech segments
     using webrtcvad for voice activity detection."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, display: Display):
         import webrtcvad
 
         self.sample_rate = settings.sample_rate
         self.vad = webrtcvad.Vad(settings.vad_aggressiveness)
-        # Number of consecutive silent 20ms frames before we consider speech done
         self.silence_threshold = settings.vad_silence_ms // 20
         self._paused = asyncio.Event()
-        self._paused.set()  # start unpaused
+        self._paused.set()
         self._energy_threshold = settings.vad_energy_threshold
+        self._display = display
 
     def pause(self) -> None:
         self._paused.clear()
@@ -121,10 +120,8 @@ class VADRecorder:
     ) -> np.ndarray:
         """Block until a complete speech segment is detected. Returns 24kHz int16 buffer.
         Returns an empty array if quit_event is set."""
-        # Use 20ms frames for more responsive VAD
         frame_duration_ms = 20
         frame_samples = int(self.sample_rate * frame_duration_ms / 1000)
-        # Target 16kHz frame for webrtcvad
         frame_16k_samples = int(16000 * frame_duration_ms / 1000)
 
         stream = sd.InputStream(
@@ -150,10 +147,8 @@ class VADRecorder:
                 frame_24k, _ = stream.read(frame_samples)
                 frame_24k = frame_24k.flatten().astype(np.int16)
 
-                # Downsample for VAD (webrtcvad needs 16kHz, exact frame size)
                 frame_16k = _downsample_24k_to_16k(frame_24k)[:frame_16k_samples]
 
-                # Combine webrtcvad with energy check to filter ambient noise
                 rms = int(np.sqrt(np.mean(frame_24k.astype(np.int32) ** 2)))
                 vad_says_speech = self.vad.is_speech(frame_16k.tobytes(), 16000)
                 is_speech = vad_says_speech and rms > self._energy_threshold
@@ -164,22 +159,11 @@ class VADRecorder:
                         self.silence_threshold - silence_count
                     ) * frame_duration_ms
                     if is_speech:
-                        bar = "#" * min(rms // 30, 30)
-                        print(
-                            f"\r  🔴 Speaking (rms={rms}) {bar:<30}", end="", flush=True
-                        )
+                        self._display.vad_speaking(rms)
                     else:
-                        print(
-                            f"\r  🟡 Silence {remaining_ms}ms...",
-                            end="          ",
-                            flush=True,
-                        )
+                        self._display.vad_silence(remaining_ms)
                 elif is_speech:
-                    print(
-                        f"\r  🔴 Speech detected (rms={rms})",
-                        end="          ",
-                        flush=True,
-                    )
+                    self._display.vad_speaking(rms)
 
                 if is_speech:
                     speech_buffer.append(frame_24k)
@@ -187,11 +171,10 @@ class VADRecorder:
                     if not is_speaking:
                         is_speaking = True
                 elif is_speaking:
-                    # Still buffer during trailing silence
                     speech_buffer.append(frame_24k)
                     silence_count += 1
                     if silence_count >= self.silence_threshold:
-                        print("\r", end=" " * 50 + "\r", flush=True)
+                        self._display.vad_clear()
                         break
         finally:
             stream.stop()
@@ -200,20 +183,23 @@ class VADRecorder:
         return np.concatenate(speech_buffer)
 
 
-async def play_response(result, settings: Settings) -> None:
+async def play_response(result, display: Display) -> None:
     """Stream TTS audio response to speakers."""
-    player = sd.OutputStream(
-        samplerate=settings.sample_rate, channels=CHANNELS, dtype=np.int16
-    )
+    player = sd.OutputStream(samplerate=24000, channels=CHANNELS, dtype=np.int16)
     player.start()
     try:
         async for event in result.stream():
             if event.type == "voice_stream_event_audio":
                 player.write(event.data)
             elif event.type == "voice_stream_event_lifecycle":
-                print(f"\r  [{event.event}]")
+                if event.event == "turn_started":
+                    display.turn_started()
+                elif event.event == "turn_ended":
+                    display.turn_ended()
+                elif event.event == "session_ended":
+                    display.session_ended()
             elif event.type == "voice_stream_event_error":
-                print(f"\r  Error: {event.error}")
+                display.api_error(str(event.error))
     finally:
         player.stop()
         player.close()

@@ -2000,6 +2000,7 @@ dependencies = [
     { name = "openai" },
     { name = "openai-agents", extra = ["voice"] },
     { name = "python-dotenv" },
+    { name = "rich" },
     { name = "sounddevice" },
     { name = "webrtcvad-wheels" },
 ]
@@ -2025,6 +2026,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.0.0,<3" },
     { name = "openai-agents", extras = ["voice"], specifier = ">=0.13.6" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
 ]

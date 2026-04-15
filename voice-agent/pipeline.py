@@ -12,6 +12,7 @@ from agents.voice import AudioInput
 
 from .audio import VADRecorder, play_response, read_key, record_push_to_talk
 from .config import Settings, load_settings
+from .display import Display
 from .providers import create_pipeline
 
 if TYPE_CHECKING:
@@ -21,26 +22,16 @@ logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
 set_tracing_disabled(True)
 
 
-def _print_connection_error(settings: Settings) -> None:
-    print("\n-- Connection error: could not reach the API server.")
-    if settings.voice_mode == "local":
-        print("   Make sure the local servers are running:")
-        print(f"     STT/TTS: {settings.mlx_audio_url}  (./scripts/start_mlx_audio.sh)")
-        print(f"     LLM:     {settings.mlx_vlm_url}  (./scripts/start_mlx_vlm.sh)")
-    else:
-        print("   Check your internet connection and OPENAI_API_KEY in .env")
-
-
 async def _run_push_to_talk(
-    settings: Settings, server_manager: ServerManager | None = None
+    settings: Settings,
+    display: Display,
+    server_manager: ServerManager | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings)
-
-    print("Voice Agent Ready (STT -> LLM -> TTS pipeline)")
-    print("Press K to start recording, K again to stop, Q to quit\n")
+    workflow, pipeline = create_pipeline(settings, display)
+    display.ready_banner(settings)
 
     while True:
-        print("-- Ready. Press K to speak.")
+        display.ready_for_key()
         while True:
             key = read_key()
             if key == "k":
@@ -49,50 +40,50 @@ async def _run_push_to_talk(
                 return
             await asyncio.sleep(0)
 
-        print("-- Recording... (press K to stop)")
+        display.recording_start()
         buffer = await record_push_to_talk(settings)
 
         if len(buffer) < settings.sample_rate * 0.5:
-            print("-- Too short, skipping.")
+            display.recording_too_short()
             continue
 
-        print(f"-- Processing {len(buffer) / settings.sample_rate:.1f}s of audio...")
+        display.processing(len(buffer) / settings.sample_rate)
         audio_input = AudioInput(buffer=buffer)
         try:
             result = await pipeline.run(audio_input)
-            await play_response(result, settings)
+            await play_response(result, display)
         except APIConnectionError:
-            _print_connection_error(settings)
+            display.connection_error(settings)
             return
         except httpx.RemoteProtocolError:
-            print("\n-- TTS server closed connection mid-stream.")
+            display.tts_stream_error()
             if server_manager:
-                server_manager.print_server_logs()
+                display.api_error_with_logs(
+                    "TTS stream interrupted", server_manager.get_all_server_logs()
+                )
         except openai.AuthenticationError as e:
-            print(f"\n-- Auth error: {e.message}")
-            print("   Check your OPENAI_API_KEY in .env")
+            display.auth_error(e.message)
             return
         except openai.RateLimitError as e:
-            print(f"\n-- Rate limit / quota error: {e.message}")
-            print(
-                "   Check your plan and billing at"
-                " https://platform.openai.com/settings/organization/billing"
-            )
+            display.rate_limit_error(e.message)
         except openai.APIError as e:
-            print(f"\n-- API error: {e.message}")
             if server_manager:
-                server_manager.print_server_logs()
+                display.api_error_with_logs(
+                    e.message, server_manager.get_all_server_logs()
+                )
+            else:
+                display.api_error(e.message)
 
 
 async def _run_vad(
-    settings: Settings, server_manager: ServerManager | None = None
+    settings: Settings,
+    display: Display,
+    server_manager: ServerManager | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings)
-    recorder = VADRecorder(settings)
-
-    print("Voice Agent Ready (STT -> LLM -> TTS pipeline)")
-    print(f"Mode: {settings.voice_mode} | Listening with VAD (Q to quit)\n")
-    print("-- Listening... speak naturally.")
+    workflow, pipeline = create_pipeline(settings, display)
+    recorder = VADRecorder(settings, display)
+    display.ready_banner(settings)
+    display.listening()
 
     quit_event = asyncio.Event()
 
@@ -116,35 +107,38 @@ async def _run_vad(
             if len(segment) < settings.sample_rate * 0.3:
                 continue
 
-            print(
-                f"-- Processing {len(segment) / settings.sample_rate:.1f}s of audio..."
-            )
+            display.processing(len(segment) / settings.sample_rate)
             audio_input = AudioInput(buffer=segment)
             try:
                 result = await pipeline.run(audio_input)
                 recorder.pause()
-                await play_response(result, settings)
+                await play_response(result, display)
                 recorder.resume()
-                print("-- Listening...")
+                display.listening()
             except APIConnectionError:
-                _print_connection_error(settings)
+                display.connection_error(settings)
                 return
             except httpx.RemoteProtocolError:
-                print("\n-- TTS server closed connection mid-stream.")
+                display.tts_stream_error()
                 if server_manager:
-                    server_manager.print_server_logs()
+                    display.api_error_with_logs(
+                        "TTS stream interrupted",
+                        server_manager.get_all_server_logs(),
+                    )
                 recorder.resume()
-                print("-- Listening...")
+                display.listening()
             except openai.AuthenticationError as e:
-                print(f"\n-- Auth error: {e.message}")
-                print("   Check your OPENAI_API_KEY in .env")
+                display.auth_error(e.message)
                 return
             except openai.RateLimitError as e:
-                print(f"\n-- Rate limit / quota error: {e.message}")
+                display.rate_limit_error(e.message)
             except openai.APIError as e:
-                print(f"\n-- API error: {e.message}")
                 if server_manager:
-                    server_manager.print_server_logs()
+                    display.api_error_with_logs(
+                        e.message, server_manager.get_all_server_logs()
+                    )
+                else:
+                    display.api_error(e.message)
     finally:
         quit_task.cancel()
 
@@ -153,20 +147,22 @@ async def run(settings: Settings | None = None) -> None:
     if settings is None:
         settings = load_settings()
 
+    display = Display()
+
     server_manager = None
     if settings.voice_mode == "local":
         from .servers import ServerManager
 
-        server_manager = ServerManager(settings)
+        server_manager = ServerManager(settings, display)
         if not await server_manager.start():
-            print("Failed to start local servers. Exiting.")
+            display.setup_failed()
             return
 
     try:
         if settings.input_mode == "vad":
-            await _run_vad(settings, server_manager)
+            await _run_vad(settings, display, server_manager)
         else:
-            await _run_push_to_talk(settings, server_manager)
+            await _run_push_to_talk(settings, display, server_manager)
     finally:
         if server_manager:
             server_manager.stop()
