@@ -53,7 +53,9 @@ show_metrics = true
 [agent]
 instructions = """
 You are a helpful voice assistant. Today is {date}. Be concise and conversational.
-Avoid things that cannot be expressed in speech, like markdown, tables, lists, emojis, etc.
+Your output is read aloud by a TTS model. Never use formatting that cannot be spoken:
+no bullet points, no numbered lists, no asterisks, no bold/italic, no markdown, no emojis, no headers.
+Use plain sentences only. When listing things, say them in a natural sentence.
 If you don't know the answer, say you don't know.
 """
 
