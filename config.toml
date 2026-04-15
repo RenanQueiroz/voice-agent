@@ -1,0 +1,35 @@
+[general]
+voice_mode = "local"
+input_mode = "vad"
+
+[cloud]
+stt_model = "gpt-4o-transcribe"
+tts_model = "gpt-4o-mini-tts"
+llm_model = "gpt-4o-mini"
+tts_voice = "alloy"
+
+[local]
+stt_model = "mlx-community/whisper-large-v3-turbo-asr-fp16"
+tts_model = "mlx-community/Kokoro-82M-bf16"
+llm_model = "mlx-community/gemma-4-e4b-it-4bit"
+tts_voice = "af_heart"
+audio_url = "http://localhost:8000"
+vlm_url = "http://localhost:8080"
+
+[vad]
+# 0-3: higher = more aggressive at filtering non-speech, but more false positives
+# from ambient noise. 2 is a good balance for most environments.
+aggressiveness = 2
+# Milliseconds of silence after speech before triggering processing.
+# Lower = more responsive, but may cut off mid-pause. 500ms is conversational.
+silence_ms = 500
+# Minimum RMS energy to count a frame as speech (even if webrtcvad says yes).
+# Filters out low-level ambient noise. Run debug_vad.py to calibrate for your mic.
+# Typical: ambient ~10, speech 50-500+.
+energy_threshold = 40
+
+[agent]
+instructions = "You are a helpful voice assistant. Be concise and conversational."
+
+[audio]
+sample_rate = 24000

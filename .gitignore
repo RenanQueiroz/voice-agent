@@ -6,5 +6,5 @@ __pycache__/
 # Environment variables file
 .env
 
-# Llamacpp files
-llama.cpp/
+# Logs
+logs/

@@ -1,1 +1,0 @@
-./update-llama.sh && ./llama.cpp/llama-server --models-max 1 --models-preset models.ini --tools all
