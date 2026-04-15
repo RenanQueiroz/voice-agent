@@ -66,6 +66,8 @@ class Settings:
     mlx_audio_url: str | None
     mlx_llm_url: str | None
     mlx_llm_server: str | None  # "mlx-vlm" or "mlx-lm"
+    mlx_kv_bits: str | None  # KV cache quantization bits (mlx-vlm only)
+    mlx_kv_quant_scheme: str | None  # KV cache quantization scheme (mlx-vlm only)
 
     # Cloud model names
     cloud_stt_model: str | None
@@ -167,6 +169,10 @@ def load_settings() -> Settings:
             "MLX_LLM_URL", local.get("llm_url") or local.get("vlm_url")
         ),
         mlx_llm_server=_get_optional("MLX_LLM_SERVER", local.get("llm_server")),
+        mlx_kv_bits=_get_optional("MLX_KV_BITS", local.get("kv_bits")),
+        mlx_kv_quant_scheme=_get_optional(
+            "MLX_KV_QUANT_SCHEME", local.get("kv_quant_scheme")
+        ),
         # Cloud models (optional when running local)
         cloud_stt_model=_get_optional("CLOUD_STT_MODEL", cloud.get("stt_model")),
         cloud_tts_model=_get_optional("CLOUD_TTS_MODEL", cloud.get("tts_model")),

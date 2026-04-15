@@ -17,6 +17,8 @@ tts_model = "mlx-community/chatterbox-turbo-4bit"
 #tts_voice = "af_heart"
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
 llm_server = "mlx-vlm"          # "mlx-vlm" for vision models, "mlx-lm" for text-only
+kv_bits = 3.5                    # KV cache quantization bits (mlx-vlm only)
+kv_quant_scheme = "turboquant"   # KV cache quantization scheme (mlx-vlm only)
 llm_url = "http://localhost:8080"
 audio_url = "http://localhost:8000"
 

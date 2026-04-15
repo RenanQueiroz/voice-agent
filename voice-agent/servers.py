@@ -298,16 +298,23 @@ class ServerManager:
             f"mlx-audio (port {audio_port})",
         )
 
+        llm_cmd = [
+            sys.executable,
+            "-m",
+            llm_module,
+            "--model",
+            s.llm_model,
+            "--port",
+            str(llm_port),
+        ]
+        if llm_server == "mlx-vlm":
+            if s.mlx_kv_bits:
+                llm_cmd.extend(["--kv-bits", s.mlx_kv_bits])
+            if s.mlx_kv_quant_scheme:
+                llm_cmd.extend(["--kv-quant-scheme", s.mlx_kv_quant_scheme])
+
         llm_proc = self._start_process(
-            [
-                sys.executable,
-                "-m",
-                llm_module,
-                "--model",
-                s.llm_model,
-                "--port",
-                str(llm_port),
-            ],
+            llm_cmd,
             f"{llm_server} (port {llm_port})",
         )
 
