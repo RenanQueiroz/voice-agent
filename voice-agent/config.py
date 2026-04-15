@@ -68,6 +68,9 @@ class Settings:
     vad_silence_ms: int
     vad_energy_threshold: int
 
+    # Display
+    show_transcript: bool
+
     # Audio
     sample_rate: int
 
@@ -147,5 +150,9 @@ def load_settings() -> Settings:
         vad_energy_threshold=int(
             _get("VAD_ENERGY_THRESHOLD", vad.get("energy_threshold"), "40")
         ),
+        show_transcript=_get(
+            "SHOW_TRANSCRIPT", t.get("display", {}).get("show_transcript"), "true"
+        ).lower()
+        == "true",
         sample_rate=int(_get("SAMPLE_RATE", audio.get("sample_rate"), "24000")),
     )

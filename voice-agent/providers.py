@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from openai import AsyncOpenAI
 
 from agents import Agent
@@ -10,6 +12,27 @@ from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.pipeline_config import VoicePipelineConfig
 
 from .config import Settings
+
+
+class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
+    """Wraps SingleAgentVoiceWorkflow to print transcriptions in real-time."""
+
+    def __init__(self, agent: Agent, show_transcript: bool = True):
+        super().__init__(agent)
+        self.show_transcript = show_transcript
+
+    async def run(self, transcription: str) -> AsyncIterator[str]:
+        if self.show_transcript:
+            print(f"\n  You: {transcription}")
+            print("  Agent: ", end="", flush=True)
+
+        async for chunk in super().run(transcription):
+            if self.show_transcript:
+                print(chunk, end="", flush=True)
+            yield chunk
+
+        if self.show_transcript:
+            print()  # newline after agent response
 
 
 def create_agent(settings: Settings) -> Agent:
@@ -50,9 +73,9 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
 
 def create_pipeline(
     settings: Settings,
-) -> tuple[SingleAgentVoiceWorkflow, VoicePipeline]:
+) -> tuple[TranscriptVoiceWorkflow, VoicePipeline]:
     agent = create_agent(settings)
-    workflow = SingleAgentVoiceWorkflow(agent)
+    workflow = TranscriptVoiceWorkflow(agent, show_transcript=settings.show_transcript)
     config = create_pipeline_config(settings)
     pipeline = VoicePipeline(
         workflow=workflow,

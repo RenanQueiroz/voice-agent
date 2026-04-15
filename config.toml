@@ -28,6 +28,10 @@ silence_ms = 500
 # Typical: ambient ~10, speech 50-500+.
 energy_threshold = 40
 
+[display]
+# Show real-time transcription of user speech and agent response in the console.
+show_transcript = true
+
 [agent]
 instructions = "You are a helpful voice assistant. Be concise and conversational."
 
