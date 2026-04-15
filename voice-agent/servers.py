@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import signal
 import subprocess
 import sys
@@ -36,7 +37,9 @@ class ServerManager:
     def _start_process(self, cmd: list[str], name: str) -> subprocess.Popen[str]:
         print(f"  Starting {name}...")
         _LOG_DIR.mkdir(exist_ok=True)
-        log_path = _LOG_DIR / f"{name.replace(' ', '_').replace('(', '').replace(')', '')}.log"
+        log_path = (
+            _LOG_DIR / f"{name.replace(' ', '_').replace('(', '').replace(')', '')}.log"
+        )
         log_file = open(log_path, "w")
         proc = subprocess.Popen(
             cmd,
@@ -48,7 +51,9 @@ class ServerManager:
         self._log_files.append((name, log_path))
         return proc
 
-    async def _wait_for_health(self, url: str, name: str, proc: subprocess.Popen[str]) -> bool:
+    async def _wait_for_health(
+        self, url: str, name: str, proc: subprocess.Popen[str]
+    ) -> bool:
         """Poll a server's endpoint until it responds or times out."""
         health_url = f"{url}/v1/models"
         elapsed = 0.0
@@ -81,32 +86,74 @@ class ServerManager:
         print(f"\n  {name} did not become ready within {STARTUP_TIMEOUT}s")
         return False
 
-    def _load_model_deps(self) -> dict[str, list[str]]:
+    def _load_model_deps(self) -> dict[str, dict]:
         """Load model dependency mapping from model_deps.toml."""
         path = _PROJECT_ROOT / "model_deps.toml"
         if not path.exists():
             return {}
         with open(path, "rb") as f:
-            raw = tomllib.load(f)
-        return {k: v["deps"] for k, v in raw.items() if "deps" in v}
+            return tomllib.load(f)
 
     def _deps_for_model(self, model_name: str) -> list[str]:
         """Return extra pip packages needed for a given model."""
         lower = model_name.lower()
         deps: list[str] = []
-        for pattern, pkgs in self._load_model_deps().items():
+        for pattern, entry in self._load_model_deps().items():
             if pattern in lower:
-                deps.extend(pkgs)
+                deps.extend(entry.get("deps", []))
         return deps
 
+    def _brew_for_model(self, model_name: str) -> list[str]:
+        """Return brew packages needed for a given model."""
+        lower = model_name.lower()
+        pkgs: list[str] = []
+        for pattern, entry in self._load_model_deps().items():
+            if pattern in lower:
+                pkgs.extend(entry.get("brew", []))
+        return pkgs
+
+    def _ensure_system_deps(self) -> bool:
+        """Install system-level (brew) dependencies if missing."""
+        missing: list[str] = []
+        for model in [self.settings.local_tts_model, self.settings.local_stt_model]:
+            for pkg in self._brew_for_model(model):
+                if not shutil.which(pkg):
+                    missing.append(pkg)
+
+        if not missing:
+            return True
+
+        if not shutil.which("brew"):
+            print(f"  Missing system packages: {', '.join(missing)}")
+            print("  Install them manually (Homebrew not found).")
+            return False
+
+        print(f"  Installing system packages: {', '.join(missing)}...")
+        result = subprocess.run(
+            ["brew", "install", *missing],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print("  Failed to install system packages:")
+            for line in result.stderr.strip().splitlines()[-10:]:
+                print(f"    {line}")
+            return False
+
+        print("  System packages installed.")
+        return True
+
     def _ensure_packages(self) -> bool:
-        """Install mlx-audio[server], mlx-vlm, and model-specific deps."""
+        """Install mlx-audio[server], mlx-vlm, model-specific deps, and system deps."""
+        if not self._ensure_system_deps():
+            return False
+
         packages: list[str] = []
 
         try:
             __import__("mlx_audio")
         except ImportError:
-            packages.append("mlx-audio[server]")
+            packages.append("mlx-audio[server,tts,stt]")
         try:
             __import__("mlx_vlm")
         except ImportError:
@@ -115,8 +162,12 @@ class ServerManager:
         # Model-specific dependencies
         for model in [self.settings.local_tts_model, self.settings.local_stt_model]:
             for dep in self._deps_for_model(model):
+                # Strip version specifiers for the import check (e.g. "misaki<0.9.4" -> "misaki")
+                import_name = (
+                    dep.split("<")[0].split(">")[0].split("=")[0].split("!")[0]
+                )
                 try:
-                    __import__(dep.replace("-", "_"))
+                    __import__(import_name.replace("-", "_"))
                 except ImportError:
                     if dep not in packages:
                         packages.append(dep)
@@ -136,8 +187,83 @@ class ServerManager:
                 print(f"    {line}")
             return False
 
-        print("  Installed successfully.\n")
+        print("  Installed successfully.")
+        self._apply_patches()
+        print()
         return True
+
+    def _apply_patches(self) -> None:
+        """Fix known compatibility issues in installed packages."""
+        # See: https://github.com/Blaizzy/mlx-audio/issues/648
+        # Issues in misaki/espeak.py:
+        # 1. EspeakWrapper.set_data_path() removed in phonemizer 3.3
+        # 2. espeakng_loader.get_data_path() returns broken CI build path
+        # 3. espeakng_loader.get_library_path() loads a dylib with hardcoded
+        #    broken paths -- must use system espeak-ng instead
+        try:
+            import misaki
+
+            espeak_py = Path(misaki.__file__).parent / "espeak.py"
+            if not espeak_py.exists():
+                return
+
+            content = espeak_py.read_text()
+            patched = content
+
+            # Find system espeak-ng paths (brew on macOS, standard on Linux)
+            for data_candidate in [
+                Path("/opt/homebrew/share/espeak-ng-data"),
+                Path("/usr/share/espeak-ng-data"),
+            ]:
+                if data_candidate.exists():
+                    sys_data = data_candidate
+                    break
+            else:
+                sys_data = None
+
+            for lib_candidate in [
+                Path("/opt/homebrew/lib/libespeak-ng.dylib"),
+                Path("/usr/lib/libespeak-ng.so"),
+            ]:
+                if lib_candidate.exists():
+                    sys_lib = lib_candidate
+                    break
+            else:
+                sys_lib = None
+
+            # Patch the library path (broken dylib from espeakng_loader pip package)
+            if sys_lib:
+                patched = patched.replace(
+                    "EspeakWrapper.set_library(espeakng_loader.get_library_path())",
+                    f'EspeakWrapper.set_library("{sys_lib}")',
+                )
+
+            # Patch the data path (broken CI build path from espeakng_loader)
+            if sys_data:
+                for old in [
+                    "EspeakWrapper.set_data_path(espeakng_loader.get_data_path())",
+                    "EspeakWrapper.data_path = espeakng_loader.get_data_path()",
+                ]:
+                    patched = patched.replace(
+                        old,
+                        f'EspeakWrapper.data_path = "{sys_data}"',
+                    )
+            elif "set_data_path" in patched:
+                patched = patched.replace(
+                    "EspeakWrapper.set_data_path(espeakng_loader.get_data_path())",
+                    "EspeakWrapper.data_path = espeakng_loader.get_data_path()",
+                )
+
+            if patched != content:
+                espeak_py.write_text(patched)
+                # Clear stale bytecode cache so the server picks up the patch
+                pycache = espeak_py.parent / "__pycache__"
+                if pycache.exists():
+                    for pyc in pycache.glob("espeak*"):
+                        pyc.unlink()
+                print("  Patched misaki/espeak.py for system espeak-ng compatibility.")
+        except Exception:
+            pass
 
     async def start(self) -> bool:
         """Start both servers and wait for them to be healthy. Returns True if ready."""
@@ -150,22 +276,31 @@ class ServerManager:
         if not self._ensure_packages():
             return False
 
+        self._apply_patches()
         print("  Starting servers (first run may download models)...\n")
 
         audio_proc = self._start_process(
             [
-                sys.executable, "-m", "mlx_audio.server",
-                "--host", "0.0.0.0",
-                "--port", str(audio_port),
+                sys.executable,
+                "-m",
+                "mlx_audio.server",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(audio_port),
             ],
             f"mlx-audio (port {audio_port})",
         )
 
         vlm_proc = self._start_process(
             [
-                sys.executable, "-m", "mlx_vlm.server",
-                "--model", s.llm_model,
-                "--port", str(vlm_port),
+                sys.executable,
+                "-m",
+                "mlx_vlm.server",
+                "--model",
+                s.llm_model,
+                "--port",
+                str(vlm_port),
             ],
             f"mlx-vlm (port {vlm_port})",
         )

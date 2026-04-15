@@ -144,6 +144,8 @@ def load_settings() -> Settings:
             _get("VAD_AGGRESSIVENESS", vad.get("aggressiveness"), "2")
         ),
         vad_silence_ms=int(_get("VAD_SILENCE_MS", vad.get("silence_ms"), "500")),
-        vad_energy_threshold=int(_get("VAD_ENERGY_THRESHOLD", vad.get("energy_threshold"), "40")),
+        vad_energy_threshold=int(
+            _get("VAD_ENERGY_THRESHOLD", vad.get("energy_threshold"), "40")
+        ),
         sample_rate=int(_get("SAMPLE_RATE", audio.get("sample_rate"), "24000")),
     )

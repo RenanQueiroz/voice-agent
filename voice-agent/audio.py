@@ -51,7 +51,9 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
     Raises KeyboardInterrupt if Q is pressed."""
     chunks: list[np.ndarray] = []
 
-    stream = sd.InputStream(samplerate=settings.sample_rate, channels=CHANNELS, dtype="int16")
+    stream = sd.InputStream(
+        samplerate=settings.sample_rate, channels=CHANNELS, dtype="int16"
+    )
     stream.start()
 
     pressed = ""
@@ -87,7 +89,9 @@ def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
     trimmed = audio[:n].reshape(-1, 3)
     # Take samples at positions 0 and 1.5 (average of 1 and 2)
     s0 = trimmed[:, 0]
-    s1 = ((trimmed[:, 1].astype(np.int32) + trimmed[:, 2].astype(np.int32)) // 2).astype(np.int16)
+    s1 = (
+        (trimmed[:, 1].astype(np.int32) + trimmed[:, 2].astype(np.int32)) // 2
+    ).astype(np.int16)
     return np.column_stack([s0, s1]).flatten()
 
 
@@ -112,7 +116,9 @@ class VADRecorder:
     def resume(self) -> None:
         self._paused.set()
 
-    async def record_segment(self, quit_event: asyncio.Event | None = None) -> np.ndarray:
+    async def record_segment(
+        self, quit_event: asyncio.Event | None = None
+    ) -> np.ndarray:
         """Block until a complete speech segment is detected. Returns 24kHz int16 buffer.
         Returns an empty array if quit_event is set."""
         # Use 20ms frames for more responsive VAD
@@ -154,14 +160,26 @@ class VADRecorder:
 
                 # Live status indicator
                 if is_speaking:
-                    remaining_ms = (self.silence_threshold - silence_count) * frame_duration_ms
+                    remaining_ms = (
+                        self.silence_threshold - silence_count
+                    ) * frame_duration_ms
                     if is_speech:
                         bar = "#" * min(rms // 30, 30)
-                        print(f"\r  🔴 Speaking (rms={rms}) {bar:<30}", end="", flush=True)
+                        print(
+                            f"\r  🔴 Speaking (rms={rms}) {bar:<30}", end="", flush=True
+                        )
                     else:
-                        print(f"\r  🟡 Silence {remaining_ms}ms...", end="          ", flush=True)
+                        print(
+                            f"\r  🟡 Silence {remaining_ms}ms...",
+                            end="          ",
+                            flush=True,
+                        )
                 elif is_speech:
-                    print(f"\r  🔴 Speech detected (rms={rms})", end="          ", flush=True)
+                    print(
+                        f"\r  🔴 Speech detected (rms={rms})",
+                        end="          ",
+                        flush=True,
+                    )
 
                 if is_speech:
                     speech_buffer.append(frame_24k)

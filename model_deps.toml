@@ -3,7 +3,11 @@
 # Values are lists of pip packages to install.
 
 [kokoro]
-deps = ["misaki", "num2words", "spacy"]
+# See: https://github.com/Blaizzy/mlx-audio/issues/648
+# misaki/phonemizer incompatibility is auto-patched at startup
+deps = ["misaki", "num2words", "spacy", "phonemizer", "espeakng-loader"]
+# System packages installed via brew (checked by binary name on PATH)
+brew = ["espeak-ng"]
 
 [qwen3-tts]
 deps = ["misaki"]

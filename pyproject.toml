@@ -1,5 +1,5 @@
 [project]
-name = "llamacpp"
+name = "voice-agent"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.14"
@@ -25,4 +25,5 @@ voice-agent = "voice_agent.__main__:main"
 [dependency-groups]
 dev = [
     "pyright>=1.1.408",
+    "ruff>=0.15.10",
 ]

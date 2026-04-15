@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from agents import Agent
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
+from agents.voice.model import TTSModelSettings
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.pipeline_config import VoicePipelineConfig
 
@@ -42,11 +43,14 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
 
     return VoicePipelineConfig(
         model_provider=provider,
+        tts_settings=TTSModelSettings(voice=settings.tts_voice),  # type: ignore[arg-type]
         tracing_disabled=True,
     )
 
 
-def create_pipeline(settings: Settings) -> tuple[SingleAgentVoiceWorkflow, VoicePipeline]:
+def create_pipeline(
+    settings: Settings,
+) -> tuple[SingleAgentVoiceWorkflow, VoicePipeline]:
     agent = create_agent(settings)
     workflow = SingleAgentVoiceWorkflow(agent)
     config = create_pipeline_config(settings)
