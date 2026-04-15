@@ -28,7 +28,7 @@ class StreamingTTSModel(OpenAITTSModel):
     async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
         response = self._client.audio.speech.with_streaming_response.create(
             model=self.model,
-            voice=settings.voice or "af_heart",
+            voice=settings.voice or "default",
             input=text,
             response_format="pcm",
             extra_body={
@@ -134,7 +134,7 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
     return VoicePipelineConfig(
         model_provider=provider,
         tts_settings=TTSModelSettings(
-            voice=settings.tts_voice,  # type: ignore[arg-type]
+            voice=settings.tts_voice if settings.tts_voice else None,  # type: ignore[arg-type]
             # Lower the sentence buffer so TTS starts sooner
             text_splitter=get_sentence_based_splitter(min_sentence_length=10),
         ),

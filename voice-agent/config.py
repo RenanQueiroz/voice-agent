@@ -124,13 +124,9 @@ class Settings:
         return self.cloud_llm_model
 
     @property
-    def tts_voice(self) -> str:
+    def tts_voice(self) -> str | None:
         if self.voice_mode == "local":
-            if not self.local_tts_voice:
-                raise ConfigError("Missing config: local.tts_voice in config.toml")
             return self.local_tts_voice
-        if not self.cloud_tts_voice:
-            raise ConfigError("Missing config: cloud.tts_voice in config.toml")
         return self.cloud_tts_voice
 
 
@@ -193,7 +189,6 @@ def load_settings() -> Settings:
         settings.stt_model
         settings.tts_model
         settings.llm_model
-        settings.tts_voice
     except ConfigError:
         raise
     if settings.voice_mode == "local":

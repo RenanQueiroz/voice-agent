@@ -10,9 +10,10 @@ tts_voice = "alloy"
 
 [local]
 stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
-tts_model = "mlx-community/Kokoro-82M-bf16"
+#tts_model = "mlx-community/Kokoro-82M-bf16"
+tts_model = "mlx-community/chatterbox-turbo-4bit"
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
-tts_voice = "af_heart"
+#tts_voice = "af_heart"
 audio_url = "http://localhost:8000"
 vlm_url = "http://localhost:8080"
 
@@ -35,7 +36,23 @@ show_transcript = true
 show_metrics = true
 
 [agent]
-instructions = "You are a helpful voice assistant. Be concise and conversational. Avoid things that cannot be expressed in speech, like tables, lists, emojis, etc. If you don't know the answer, say you don't know."
+instructions = """
+You are a helpful voice assistant. Be concise and conversational. 
+Avoid things that cannot be expressed in speech, like tables, lists, emojis, etc. 
+If you don't know the answer, say you don't know.
+Use the following tags to express non-speech sounds or expressions:
+
+Tag	Description
+[clear throat]	Throat clearing sound
+[sigh]	Sighing expression
+[shush]	Shushing sound
+[cough]	Coughing sound
+[groan]	Groaning expression
+[sniff]	Sniffing sound
+[gasp]	Gasping expression
+[chuckle]	Light chuckling
+[laugh]	Laughter
+"""
 
 [audio]
 sample_rate = 24000
