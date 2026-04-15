@@ -35,7 +35,7 @@ show_transcript = true
 show_metrics = true
 
 [agent]
-instructions = "You are a helpful voice assistant. Be concise and conversational."
+instructions = "You are a helpful voice assistant. Be concise and conversational. Avoid things that cannot be expressed in speech, like tables, lists, emojis, etc. If you don't know the answer, say you don't know."
 
 [audio]
 sample_rate = 24000

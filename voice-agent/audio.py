@@ -139,13 +139,18 @@ class VADRecorder:
 
         # Require this many consecutive speech frames before we start buffering.
         # Filters out transient noises like key clicks, mouse scrolls.
-        # 8 frames = 160ms -- long enough to reject most mechanical noises.
-        speech_start_threshold = 8
+        # 3 frames = 60ms -- short enough to not clip speech onset.
+        speech_start_threshold = 3
+
+        # Pre-roll: keep last N frames so we don't clip speech onset
+        pre_roll_size = 5  # 5 frames = 100ms of audio before speech was detected
+        from collections import deque
 
         while not quit_event.is_set():
             # Record one complete speech segment
             speech_buffer: list[np.ndarray] = []
             pending_frames: list[np.ndarray] = []
+            pre_roll: deque[np.ndarray] = deque(maxlen=pre_roll_size)
             speech_frame_count = 0
             silence_count = 0
             is_speaking = False
@@ -176,8 +181,9 @@ class VADRecorder:
                         pending_frames.append(frame_24k)
                         speech_frame_count += 1
                         if speech_frame_count >= speech_start_threshold:
-                            # Confirmed speech -- promote pending frames
+                            # Confirmed speech -- prepend pre-roll + pending
                             is_speaking = True
+                            speech_buffer.extend(pre_roll)
                             speech_buffer.extend(pending_frames)
                             pending_frames.clear()
                             self._display.vad_speaking(rms)
@@ -185,6 +191,7 @@ class VADRecorder:
                         # Reset -- noise was transient
                         speech_frame_count = 0
                         pending_frames.clear()
+                        pre_roll.append(frame_24k)
                 else:
                     # Already speaking
                     remaining_ms = (

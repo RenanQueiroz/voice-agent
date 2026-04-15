@@ -59,6 +59,7 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         self._partial_response = ""
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
+        transcription = transcription.strip()
         self.last_metrics = TurnMetrics()
         self._partial_response = ""
 
