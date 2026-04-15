@@ -45,6 +45,7 @@ class Display:
         self._vad_rms = 0
         self._vad_remaining_ms = 0
         self._processing_duration = 0.0
+        self._mcp_tool_names: list[str] = []
 
     # ── Footer management ────────────────────────────────────
 
@@ -107,16 +108,22 @@ class Display:
                 return model.split("/")[-1] if "/" in model else model
 
             bar.append("\n ")
-            bar.append("STT:", style="dim")
+            bar.append("STT: ", style="dim")
             bar.append(_short(s.stt_model), style="cyan dim")
             bar.append("  ", style="dim")
-            bar.append("LLM:", style="dim")
+            bar.append("LLM: ", style="dim")
             bar.append(_short(s.llm_model), style="cyan dim")
             bar.append("  ", style="dim")
-            bar.append("TTS:", style="dim")
+            bar.append("TTS: ", style="dim")
             bar.append(_short(s.tts_model), style="cyan dim")
 
-        # Line 3: Controls
+        # Line 3: MCP tools (if any)
+        if self._mcp_tool_names:
+            bar.append("\n ")
+            bar.append("Tools: ", style="dim")
+            bar.append(" ".join(self._mcp_tool_names), style="yellow dim")
+
+        # Line 4: Controls
         bar.append("\n ")
         if self._state in ("responding", "processing"):
             bar.append("Space", style="bold yellow")
@@ -141,6 +148,10 @@ class Display:
 
     def _set_state(self, state: str) -> None:
         self._state = state
+        self._update_footer()
+
+    def set_mcp_tools(self, tool_names: list[str]) -> None:
+        self._mcp_tool_names = tool_names
         self._update_footer()
 
     # ── Startup ──────────────────────────────────────────────
@@ -242,6 +253,13 @@ class Display:
     def processing(self, duration: float) -> None:
         self._processing_duration = duration
         self._set_state("processing")
+
+    def tool_call(self, name: str, args: str) -> None:
+        args_short = args[:100] + "..." if len(args) > 100 else args
+        self._print(f"\n  [dim]Tool:[/] [yellow]{name}[/][dim]({args_short})[/]")
+
+    def tool_result(self, output: str) -> None:
+        self._print(f"  [dim]Result: {output}[/]\n")
 
     def interrupted(self) -> None:
         self._print("[dim]  -- interrupted[/]")

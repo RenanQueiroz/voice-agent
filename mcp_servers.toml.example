@@ -1,0 +1,29 @@
+# MCP Server Configuration
+# Each section defines an MCP server that will be available to the agent.
+#
+# Stdio servers (run a local command):
+#   [server-name]
+#   type = "stdio"
+#   command = "npx"
+#   args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+#   env = { KEY = "value" }       # optional
+#   cwd = "/working/directory"    # optional
+#
+# HTTP servers (connect to a running server):
+#   [server-name]
+#   type = "http"
+#   url = "http://localhost:3000/mcp"
+#
+# Common options (all types):
+#   cache_tools = true            # Cache tool list for lower latency (default: true)
+#
+# Environment variable substitution:
+#   Use ${VAR_NAME} in any string value to reference variables from .env or the environment.
+#   Example: env = { API_KEY = "${MY_SECRET_KEY}" }
+
+# Example:
+# [filesystem]
+# type = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# cache_tools = true

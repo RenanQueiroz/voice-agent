@@ -14,6 +14,7 @@ from agents.voice import AudioInput
 from .audio import AudioPlayer, VADRecorder, read_key, record_push_to_talk
 from .config import Settings, load_settings
 from .display import Display
+from .mcp import load_mcp_servers
 from .providers import TranscriptVoiceWorkflow, create_pipeline
 
 if TYPE_CHECKING:
@@ -72,8 +73,9 @@ async def _run_push_to_talk(
     settings: Settings,
     display: Display,
     server_manager: ServerManager | None = None,
+    mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, display)
+    workflow, pipeline = create_pipeline(settings, display, mcp_servers=mcp_servers)
     player = AudioPlayer()
     display.ready_banner(settings)
 
@@ -104,8 +106,9 @@ async def _run_vad(
     settings: Settings,
     display: Display,
     server_manager: ServerManager | None = None,
+    mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, display)
+    workflow, pipeline = create_pipeline(settings, display, mcp_servers=mcp_servers)
     recorder = VADRecorder(settings, display)
     player = AudioPlayer()
     display.ready_banner(settings)
@@ -235,12 +238,34 @@ async def run(settings: Settings | None = None) -> None:
             display.setup_failed()
             return
 
+    # Connect MCP servers
+    mcp_servers = load_mcp_servers()
+    for server in mcp_servers:
+        try:
+            await server.connect()
+        except Exception as e:
+            display.api_error(f"Failed to connect MCP server '{server.name}': {e}")
+            return
+
+    # Collect tool names for the footer
+    if mcp_servers:
+        all_tool_names: list[str] = []
+        for server in mcp_servers:
+            tools = await server.list_tools()
+            all_tool_names.extend(t.name for t in tools)
+        display.set_mcp_tools(all_tool_names)
+
     try:
         if settings.input_mode == "vad":
-            await _run_vad(settings, display, server_manager)
+            await _run_vad(settings, display, server_manager, mcp_servers)
         else:
-            await _run_push_to_talk(settings, display, server_manager)
+            await _run_push_to_talk(settings, display, server_manager, mcp_servers)
     finally:
+        for server in mcp_servers:
+            try:
+                await server.cleanup()
+            except Exception:
+                pass
         display.stop_footer()
         if server_manager:
             server_manager.stop()

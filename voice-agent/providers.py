@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
-from agents import Agent
+from agents import Agent, Runner
+from agents.mcp import MCPServer
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 from agents.voice.model import TTSModelSettings
@@ -70,17 +71,48 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         stt_display = self.last_metrics.stt_seconds if self.show_metrics else 0.0
         if self.show_transcript:
             self.display.user_said(transcription, stt_seconds=stt_display)
-            self.display.agent_start()
+
+        # Add transcription to history (replicate parent logic)
+        self._input_history.append({"role": "user", "content": transcription})
 
         llm_start = time.monotonic()
         token_count = 0
+        agent_started = False
 
-        async for chunk in super().run(transcription):
-            self._partial_response += chunk
-            token_count += 1
-            if self.show_transcript:
-                self.display.agent_chunk(chunk)
-            yield chunk
+        # Run the agent and intercept all events (tool calls + text)
+        result = Runner.run_streamed(self._current_agent, self._input_history)
+        async for event in result.stream_events():
+            if event.type == "run_item_stream_event" and event.name == "tool_called":
+                if self.show_transcript:
+                    tool_name = getattr(event.item.raw_item, "name", "tool")
+                    tool_args = getattr(event.item.raw_item, "arguments", "")
+                    self.display.tool_call(tool_name, tool_args)
+            elif event.type == "run_item_stream_event" and event.name == "tool_output":
+                if self.show_transcript:
+                    output = (
+                        str(event.item.output) if hasattr(event.item, "output") else ""
+                    )
+                    # Truncate long outputs
+                    if len(output) > 200:
+                        output = output[:200] + "..."
+                    self.display.tool_result(output)
+            elif (
+                event.type == "raw_response_event"
+                and event.data.type == "response.output_text.delta"
+            ):
+                if not agent_started and self.show_transcript:
+                    self.display.agent_start()
+                    agent_started = True
+                chunk = event.data.delta
+                self._partial_response += chunk
+                token_count += 1
+                if self.show_transcript:
+                    self.display.agent_chunk(chunk)
+                yield chunk
+
+        # Update history and agent (replicate parent logic)
+        self._input_history = result.to_input_list()
+        self._current_agent = result.last_agent
 
         self.last_metrics.llm_seconds = time.monotonic() - llm_start
         self.last_metrics.llm_tokens = token_count
@@ -102,7 +134,10 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                 self.display.agent_end()
 
 
-def create_agent(settings: Settings) -> Agent:
+def create_agent(
+    settings: Settings,
+    mcp_servers: list[MCPServer] | None = None,
+) -> Agent:
     if settings.voice_mode == "local":
         client = AsyncOpenAI(
             base_url=f"{settings.mlx_vlm_url}/v1",
@@ -119,6 +154,7 @@ def create_agent(settings: Settings) -> Agent:
         name="Assistant",
         instructions=settings.agent_instructions,
         model=model,
+        mcp_servers=mcp_servers or [],
     )
 
 
@@ -145,8 +181,9 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
 def create_pipeline(
     settings: Settings,
     display: Display,
+    mcp_servers: list[MCPServer] | None = None,
 ) -> tuple[TranscriptVoiceWorkflow, VoicePipeline]:
-    agent = create_agent(settings)
+    agent = create_agent(settings, mcp_servers=mcp_servers)
     workflow = TranscriptVoiceWorkflow(
         agent,
         display=display,
