@@ -12,9 +12,9 @@ tts_voice = "alloy"
 
 [local]
 stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
-#tts_model = "mlx-community/Kokoro-82M-bf16"
-tts_model = "mlx-community/chatterbox-turbo-4bit"
-#tts_voice = "af_heart"
+tts_model = "mlx-community/Kokoro-82M-bf16"
+#tts_model = "mlx-community/chatterbox-turbo-4bit"
+tts_voice = "af_heart"
 llm_server = "llamacpp"          # "mlx-vlm", "mlx-lm", or "llamacpp"
 llm_url = "http://localhost:8080"
 audio_url = "http://localhost:8000"
@@ -28,7 +28,8 @@ kv_quant_scheme = "turboquant"
 llm_model = "mlx-community/gemma-3-4b-it-4bit"
 
 [local.llamacpp]
-llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
+#llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
+llm_model = "gpt-oss-20b-low"
 preset = "models.ini"            # path to llama-server --models-preset INI file
 
 [vad]
@@ -52,8 +53,14 @@ show_metrics = true
 [agent]
 instructions = """
 You are a helpful voice assistant. Today is {date}. Be concise and conversational.
-Avoid things that cannot be expressed in speech, like tables, lists, emojis, etc.
+Avoid things that cannot be expressed in speech, like markdown, tables, lists, emojis, etc.
 If you don't know the answer, say you don't know.
+"""
+
+# Model-specific instruction snippets. Keys are substring patterns matched against
+# active model names (STT, TTS, LLM). Matching snippets are appended to instructions.
+[agent.model-instructions]
+chatterbox = """
 Use the following tags to express non-speech sounds or expressions:
 
 Tag	Description

@@ -238,4 +238,16 @@ def load_settings() -> Settings:
     if settings.voice_mode == "cloud" and not settings.openai_api_key:
         raise ConfigError("Missing config: OPENAI_API_KEY in .env")
 
+    # Append model-specific instruction snippets
+    model_instructions = agent.get("model-instructions", {})
+    if model_instructions:
+        active_models = [
+            settings.stt_model.lower(),
+            settings.tts_model.lower(),
+            settings.llm_model.lower(),
+        ]
+        for pattern, text in model_instructions.items():
+            if any(pattern in m for m in active_models):
+                settings.agent_instructions += str(text)
+
     return settings
