@@ -1,4 +1,4 @@
-"""Manages local mlx-audio and mlx-vlm server processes."""
+"""Manages local mlx-audio and LLM server processes."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _LOG_DIR = _PROJECT_ROOT / "logs"
 
 
 class ServerManager:
-    """Starts, health-checks, and stops local mlx-audio and mlx-vlm servers."""
+    """Starts, health-checks, and stops local mlx-audio and LLM servers."""
 
     def __init__(self, settings: Settings, display: Display):
         self.settings = settings
@@ -57,10 +57,14 @@ class ServerManager:
         return proc
 
     async def _wait_for_health(
-        self, url: str, name: str, proc: subprocess.Popen[str]
+        self,
+        url: str,
+        name: str,
+        proc: subprocess.Popen[str],
+        health_path: str = "/v1/models",
     ) -> bool:
         """Poll a server's endpoint until it responds or times out."""
-        health_url = f"{url}/v1/models"
+        health_url = f"{url}{health_path}"
         elapsed = 0.0
         interval = 2.0
         last_elapsed = -1
@@ -162,14 +166,15 @@ class ServerManager:
         except ImportError:
             packages.append("mlx-audio[server,tts,stt]")
 
-        # Install the right LLM server based on config
+        # Install the right MLX LLM server based on config (llamacpp is a binary, not pip)
         llm_server = self.settings.mlx_llm_server or "mlx-vlm"
-        llm_import = "mlx_vlm" if llm_server == "mlx-vlm" else "mlx_lm"
-        llm_pip = "mlx-vlm" if llm_server == "mlx-vlm" else "mlx-lm"
-        try:
-            __import__(llm_import)
-        except ImportError:
-            packages.append(llm_pip)
+        if llm_server != "llamacpp":
+            llm_import = "mlx_vlm" if llm_server == "mlx-vlm" else "mlx_lm"
+            llm_pip = "mlx-vlm" if llm_server == "mlx-vlm" else "mlx-lm"
+            try:
+                __import__(llm_import)
+            except ImportError:
+                packages.append(llm_pip)
 
         for model in [self.settings.tts_model, self.settings.stt_model]:
             for dep in self._deps_for_model(model):
@@ -193,6 +198,39 @@ class ServerManager:
         )
         if result.returncode != 0:
             self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
+            return False
+
+        self.display.server_installed()
+        return True
+
+    def _ensure_llamacpp(self) -> bool:
+        """Run setup-llamacpp.sh to ensure the llama-server binary is available."""
+        llama_bin = _PROJECT_ROOT / "llamacpp" / "llama-server"
+        setup_script = _PROJECT_ROOT / "setup-llamacpp.sh"
+
+        if not setup_script.exists():
+            self.display.server_install_failed(
+                [f"Setup script not found: {setup_script}"]
+            )
+            return False
+
+        self.display.server_installing(["llamacpp"])
+        result = subprocess.run(
+            ["bash", str(setup_script)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
+            return False
+
+        if not llama_bin.exists():
+            self.display.server_install_failed(
+                [
+                    "llama-server binary not found after setup.",
+                    f"Expected at: {llama_bin}",
+                ]
+            )
             return False
 
         self.display.server_installed()
@@ -271,12 +309,9 @@ class ServerManager:
         assert s.mlx_llm_server is not None
         audio_url = s.mlx_audio_url
         llm_url = s.mlx_llm_url
-        llm_server = s.mlx_llm_server  # "mlx-vlm" or "mlx-lm"
+        llm_server = s.mlx_llm_server
         audio_port = self._parse_port(audio_url)
         llm_port = self._parse_port(llm_url)
-
-        # Determine the Python module for the LLM server
-        llm_module = "mlx_vlm.server" if llm_server == "mlx-vlm" else "mlx_lm.server"
 
         self.display.server_setup_start()
 
@@ -285,6 +320,7 @@ class ServerManager:
 
         self._apply_patches()
 
+        # Start audio server (same for all LLM backends)
         audio_proc = self._start_process(
             [
                 sys.executable,
@@ -298,20 +334,41 @@ class ServerManager:
             f"mlx-audio (port {audio_port})",
         )
 
-        llm_cmd = [
-            sys.executable,
-            "-m",
-            llm_module,
-            "--model",
-            s.llm_model,
-            "--port",
-            str(llm_port),
-        ]
-        if llm_server == "mlx-vlm":
-            if s.mlx_kv_bits:
-                llm_cmd.extend(["--kv-bits", s.mlx_kv_bits])
-            if s.mlx_kv_quant_scheme:
-                llm_cmd.extend(["--kv-quant-scheme", s.mlx_kv_quant_scheme])
+        # Build LLM server command based on backend
+        if llm_server == "llamacpp":
+            if not self._ensure_llamacpp():
+                return False
+            llama_bin = str(_PROJECT_ROOT / "llamacpp" / "llama-server")
+            llm_cmd = [
+                llama_bin,
+                "--host",
+                "0.0.0.0",
+                "--port",
+                str(llm_port),
+            ]
+            if s.llamacpp_preset:
+                preset_path = str(_PROJECT_ROOT / s.llamacpp_preset)
+                llm_cmd.extend(["--models-preset", preset_path])
+            llm_health_path = "/health"
+        else:
+            llm_module = (
+                "mlx_vlm.server" if llm_server == "mlx-vlm" else "mlx_lm.server"
+            )
+            llm_cmd = [
+                sys.executable,
+                "-m",
+                llm_module,
+                "--model",
+                s.llm_model,
+                "--port",
+                str(llm_port),
+            ]
+            if llm_server == "mlx-vlm":
+                if s.mlx_kv_bits:
+                    llm_cmd.extend(["--kv-bits", s.mlx_kv_bits])
+                if s.mlx_kv_quant_scheme:
+                    llm_cmd.extend(["--kv-quant-scheme", s.mlx_kv_quant_scheme])
+            llm_health_path = "/v1/models"
 
         llm_proc = self._start_process(
             llm_cmd,
@@ -320,7 +377,9 @@ class ServerManager:
 
         audio_ok, llm_ok = await asyncio.gather(
             self._wait_for_health(audio_url, "mlx-audio", audio_proc),
-            self._wait_for_health(llm_url, llm_server, llm_proc),
+            self._wait_for_health(
+                llm_url, llm_server, llm_proc, health_path=llm_health_path
+            ),
         )
 
         if audio_ok and llm_ok:

@@ -9,3 +9,9 @@ mcp_servers.toml
 
 # Logs
 logs/
+
+# llama.cpp binaries
+llamacpp/
+
+# llama.cpp model preset (user-specific, like .env)
+models.ini

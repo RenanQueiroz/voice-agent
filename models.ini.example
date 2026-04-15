@@ -1,0 +1,14 @@
+# llama-server model preset file.
+# Copy this to models.ini and customize for your setup.
+# Used with: llama-server --models-preset models.ini
+#
+# [*] applies to all models. Model-specific sections override global settings.
+# Keys correspond to llama-server CLI args (without leading dashes).
+# See: https://github.com/ggml-org/llama.cpp/tree/master/tools/server
+
+[*]
+# ctx-size = 8192
+
+[gemma-4-e4b-it]
+model = path/to/gemma-4-e4b-it.gguf
+# n-gpu-layers = 99

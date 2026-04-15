@@ -21,9 +21,6 @@ local = [
     "mlx-vlm",
 ]
 
-[project.scripts]
-voice-agent = "voice_agent.__main__:main"
-
 [dependency-groups]
 dev = [
     "pyright>=1.1.408",

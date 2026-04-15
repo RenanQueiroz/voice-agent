@@ -2,7 +2,7 @@
 voice_mode = "local"
 input_mode = "vad"
 # Enable MCP tool servers (defined in mcp_servers.toml). Some models may not support tool use.
-enable_mcp = false
+enable_mcp = true
 
 [cloud]
 stt_model = "gpt-4o-transcribe"
@@ -15,12 +15,21 @@ stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
 #tts_model = "mlx-community/Kokoro-82M-bf16"
 tts_model = "mlx-community/chatterbox-turbo-4bit"
 #tts_voice = "af_heart"
-llm_model = "mlx-community/gemma-4-e4b-it-4bit"
-llm_server = "mlx-vlm"          # "mlx-vlm" for vision models, "mlx-lm" for text-only
-kv_bits = 3.5                    # KV cache quantization bits (mlx-vlm only)
-kv_quant_scheme = "turboquant"   # KV cache quantization scheme (mlx-vlm only)
+llm_server = "llamacpp"          # "mlx-vlm", "mlx-lm", or "llamacpp"
 llm_url = "http://localhost:8080"
 audio_url = "http://localhost:8000"
+
+[local.mlx-vlm]
+llm_model = "mlx-community/gemma-4-e4b-it-4bit"
+kv_bits = 3.5
+kv_quant_scheme = "turboquant"
+
+[local.mlx-lm]
+llm_model = "mlx-community/gemma-3-4b-it-4bit"
+
+[local.llamacpp]
+llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
+preset = "models.ini"            # path to llama-server --models-preset INI file
 
 [vad]
 # 0-3: higher = more aggressive at filtering non-speech, but more false positives

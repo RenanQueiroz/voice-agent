@@ -69,13 +69,14 @@ uv run python -m voice-agent
 ```
 
 In local mode, the agent will automatically:
-1. Install `mlx-audio` and `mlx-vlm` if needed
+1. Install `mlx-audio` and the configured LLM server package if needed
 2. Install model-specific dependencies (see `model_deps.toml`)
 3. Install system packages via Homebrew (e.g., `espeak-ng`)
-4. Patch known compatibility issues
-5. Start the STT/TTS server (mlx-audio) and LLM server (mlx-vlm)
-6. Wait for models to download and servers to be ready
-7. Begin listening
+4. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
+5. Patch known compatibility issues
+6. Start the STT/TTS server (mlx-audio) and the LLM server
+7. Wait for models to download and servers to be ready
+8. Begin listening
 
 ## Controls
 
@@ -117,11 +118,22 @@ tts_voice = "alloy"         # optional
 [local]
 stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
 tts_model = "mlx-community/Kokoro-82M-bf16"
-llm_model = "mlx-community/gemma-4-e4b-it-4bit"
 tts_voice = "af_heart"      # optional, some models don't need one
-audio_url = "http://localhost:8000"
-llm_server = "mlx-vlm"     # "mlx-vlm" for vision models, "mlx-lm" for text-only
+llm_server = "mlx-vlm"     # "mlx-vlm", "mlx-lm", or "llamacpp"
 llm_url = "http://localhost:8080"
+audio_url = "http://localhost:8000"
+
+[local.mlx-vlm]
+llm_model = "mlx-community/gemma-4-e4b-it-4bit"
+kv_bits = 3.5
+kv_quant_scheme = "turboquant"
+
+[local.mlx-lm]
+llm_model = "mlx-community/gemma-3-4b-it-4bit"
+
+[local.llamacpp]
+llm_model = "gemma-4-e4b-it"    # must match a model alias in models.ini
+preset = "models.ini"
 
 [vad]
 aggressiveness = 2          # 0-3, higher = more aggressive filtering
@@ -157,7 +169,8 @@ OPENAI_API_KEY=sk-...
 
 Any `config.toml` value can be overridden via environment variable. For example:
 - `VOICE_MODE=cloud` overrides `general.voice_mode`
-- `LOCAL_LLM_MODEL=mlx-community/some-model` overrides `local.llm_model`
+- `LOCAL_LLM_MODEL=mlx-community/some-model` overrides `local.<server>.llm_model`
+- `MLX_LLM_SERVER=llamacpp` overrides `local.llm_server`
 
 ### model_deps.toml
 
@@ -227,13 +240,13 @@ voice-agent/
   display.py        # Rich TUI with persistent footer
   pipeline.py       # Async conversation loop with interruption
   providers.py      # Model providers, streaming TTS, transcript workflow
-  servers.py        # Local mlx-audio/mlx-vlm server lifecycle
+  servers.py        # Local server lifecycle (mlx-audio, mlx-vlm/mlx-lm/llamacpp)
   mcp.py            # MCP server loading from mcp_servers.toml
 ```
 
 ### Key Design Decisions
 
-- **OpenAI-compatible endpoints**: Both mlx-audio and mlx-vlm expose OpenAI-compatible APIs, so we reuse the SDK's existing `OpenAISTTModel`, `OpenAITTSModel`, and `OpenAIChatCompletionsModel` pointed at localhost.
+- **OpenAI-compatible endpoints**: All local backends (mlx-audio, mlx-vlm, mlx-lm, llamacpp) expose OpenAI-compatible APIs, so we reuse the SDK's existing `OpenAISTTModel`, `OpenAITTSModel`, and `OpenAIChatCompletionsModel` pointed at localhost.
 - **VAD with pre-roll**: A 100ms ring buffer captures audio before speech onset, preventing clipped words. Speech requires 3 consecutive frames (60ms) to confirm, filtering transient noise.
 - **Echo suppression**: The mic is muted during agent response to prevent the agent from hearing its own voice through speakers. Press Space to interrupt instead.
 - **Streaming**: LLM tokens stream via SSE, TTS audio streams via chunked HTTP (`stream=True`), and the SDK's sentence splitter sends text to TTS at sentence boundaries rather than waiting for the full response.
@@ -246,6 +259,7 @@ voice-agent/
 | `./start.sh` | Run the voice agent |
 | `./setup.sh` | Install all dependencies (core + local) |
 | `./setup.sh --update` | Update all dependencies to latest versions |
+| `./setup-llamacpp.sh` | Download/update llama.cpp binaries (for llamacpp backend) |
 
 ## Development
 
@@ -267,18 +281,19 @@ uv run python -m voice-agent
 
 When running in local mode, server logs are saved to `logs/`:
 - `logs/mlx-audio_port_8000.log` -- STT/TTS server
-- `logs/mlx-vlm_port_8080.log` -- LLM server
+- `logs/mlx-vlm_port_8080.log` / `logs/llamacpp_port_8080.log` -- LLM server
 
 API errors automatically display the relevant server log tail.
 
-### Choosing between mlx-lm and mlx-vlm
+### Choosing an LLM backend
 
-The `llm_server` setting in `[local]` controls which server runs the LLM:
+The `llm_server` setting in `[local]` controls which server runs the LLM. Each backend has its own config subsection:
 
-- **`mlx-vlm`**: For vision-language models (gemma-4, qwen2-vl, etc.)
-- **`mlx-lm`**: For text-only models (gpt-oss, llama, qwen, etc.)
+- **`mlx-vlm`** (`[local.mlx-vlm]`): For vision-language models (gemma-4, qwen2-vl, etc.). Supports KV cache quantization via `kv_bits`/`kv_quant_scheme`.
+- **`mlx-lm`** (`[local.mlx-lm]`): For text-only MLX models (llama, qwen, etc.)
+- **`llamacpp`** (`[local.llamacpp]`): Uses llama.cpp's `llama-server` with GGUF models. Models are configured in a separate INI preset file (see `models.ini.example`). Run `./setup-llamacpp.sh` to download the binary.
 
-If your model isn't supported by one, try the other. Both expose the same OpenAI-compatible API.
+All backends expose the same OpenAI-compatible API, so the rest of the pipeline works identically.
 
 ### VAD too sensitive / not sensitive enough
 

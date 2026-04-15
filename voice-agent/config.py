@@ -65,9 +65,10 @@ class Settings:
     # Local server config
     mlx_audio_url: str | None
     mlx_llm_url: str | None
-    mlx_llm_server: str | None  # "mlx-vlm" or "mlx-lm"
+    mlx_llm_server: str | None  # "mlx-vlm", "mlx-lm", or "llamacpp"
     mlx_kv_bits: str | None  # KV cache quantization bits (mlx-vlm only)
     mlx_kv_quant_scheme: str | None  # KV cache quantization scheme (mlx-vlm only)
+    llamacpp_preset: str | None  # path to llama-server models preset INI file
 
     # Cloud model names
     cloud_stt_model: str | None
@@ -123,7 +124,10 @@ class Settings:
     def llm_model(self) -> str:
         if self.voice_mode == "local":
             if not self.local_llm_model:
-                raise ConfigError("Missing config: local.llm_model in config.toml")
+                section = self.mlx_llm_server or "local"
+                raise ConfigError(
+                    f"Missing config: llm_model in [local.{section}] in config.toml"
+                )
             return self.local_llm_model
         if not self.cloud_llm_model:
             raise ConfigError("Missing config: cloud.llm_model in config.toml")
@@ -159,6 +163,10 @@ def load_settings() -> Settings:
             f"Invalid input_mode: '{input_mode}' (must be 'push_to_talk' or 'vad')"
         )
 
+    # Resolve LLM server type first, then load from its subsection
+    llm_server = _get_optional("MLX_LLM_SERVER", local.get("llm_server"))
+    llm_section = local.get(llm_server, {}) if llm_server else {}
+
     settings = Settings(
         voice_mode=voice_mode,  # type: ignore[arg-type]
         input_mode=input_mode,  # type: ignore[arg-type]
@@ -168,11 +176,12 @@ def load_settings() -> Settings:
         mlx_llm_url=_get_optional(
             "MLX_LLM_URL", local.get("llm_url") or local.get("vlm_url")
         ),
-        mlx_llm_server=_get_optional("MLX_LLM_SERVER", local.get("llm_server")),
-        mlx_kv_bits=_get_optional("MLX_KV_BITS", local.get("kv_bits")),
+        mlx_llm_server=llm_server,
+        mlx_kv_bits=_get_optional("MLX_KV_BITS", llm_section.get("kv_bits")),
         mlx_kv_quant_scheme=_get_optional(
-            "MLX_KV_QUANT_SCHEME", local.get("kv_quant_scheme")
+            "MLX_KV_QUANT_SCHEME", llm_section.get("kv_quant_scheme")
         ),
+        llamacpp_preset=_get_optional("LLAMACPP_PRESET", llm_section.get("preset")),
         # Cloud models (optional when running local)
         cloud_stt_model=_get_optional("CLOUD_STT_MODEL", cloud.get("stt_model")),
         cloud_tts_model=_get_optional("CLOUD_TTS_MODEL", cloud.get("tts_model")),
@@ -181,7 +190,7 @@ def load_settings() -> Settings:
         # Local models (optional when running cloud)
         local_stt_model=_get_optional("LOCAL_STT_MODEL", local.get("stt_model")),
         local_tts_model=_get_optional("LOCAL_TTS_MODEL", local.get("tts_model")),
-        local_llm_model=_get_optional("LOCAL_LLM_MODEL", local.get("llm_model")),
+        local_llm_model=_get_optional("LOCAL_LLM_MODEL", llm_section.get("llm_model")),
         local_tts_voice=_get_optional("LOCAL_TTS_VOICE", local.get("tts_voice")),
         # Required settings
         agent_instructions=_get("AGENT_INSTRUCTIONS", agent.get("instructions")),
@@ -210,11 +219,22 @@ def load_settings() -> Settings:
             raise ConfigError("Missing config: local.audio_url in config.toml")
         if not settings.mlx_llm_url:
             raise ConfigError("Missing config: local.llm_url in config.toml")
-        if settings.mlx_llm_server not in ("mlx-vlm", "mlx-lm"):
+        if settings.mlx_llm_server not in ("mlx-vlm", "mlx-lm", "llamacpp"):
             raise ConfigError(
                 f"Invalid local.llm_server: '{settings.mlx_llm_server}'"
-                " (must be 'mlx-vlm' or 'mlx-lm')"
+                " (must be 'mlx-vlm', 'mlx-lm', or 'llamacpp')"
             )
+        if settings.mlx_llm_server == "llamacpp":
+            if not settings.llamacpp_preset:
+                raise ConfigError(
+                    "Missing config: preset in [local.llamacpp] in config.toml"
+                )
+            preset_path = _PROJECT_ROOT / settings.llamacpp_preset
+            if not preset_path.exists():
+                raise ConfigError(
+                    f"llamacpp preset file not found: {preset_path}\n"
+                    "Copy models.ini.example to models.ini and customize it."
+                )
     if settings.voice_mode == "cloud" and not settings.openai_api_key:
         raise ConfigError("Missing config: OPENAI_API_KEY in .env")
 

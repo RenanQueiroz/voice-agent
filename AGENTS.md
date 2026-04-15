@@ -22,17 +22,18 @@ voice-agent/
                     #   _process_turn(), interruption handling, MCP lifecycle
   providers.py      # TranscriptVoiceWorkflow (intercepts STT/LLM/tool events for display),
                     #   StreamingTTSModel, create_agent(), create_pipeline()
-  servers.py        # ServerManager: starts/stops mlx-audio and mlx-vlm,
-                    #   health checks, dependency installation, patching
+  servers.py        # ServerManager: starts/stops mlx-audio and LLM servers
+                    #   (mlx-vlm, mlx-lm, llamacpp), health checks, dep install
   mcp.py            # Loads MCP server configs from mcp_servers.toml,
                     #   supports ${VAR} env substitution
 ```
 
 ## Configuration Files
 
-- `config.toml` -- committed, all settings. No hardcoded defaults in code.
+- `config.toml` -- committed, all settings. No hardcoded defaults in code. LLM model config lives in server-type subsections (`[local.mlx-vlm]`, `[local.mlx-lm]`, `[local.llamacpp]`).
 - `.env` -- gitignored, secrets only (API keys).
 - `mcp_servers.toml` -- gitignored, MCP server definitions. Copy from `mcp_servers.toml.example`.
+- `models.ini` -- gitignored, llama-server model preset file. Copy from `models.ini.example`. Only used when `llm_server = "llamacpp"`.
 - `model_deps.toml` -- committed, maps model name patterns to pip/brew dependencies.
 - Environment variables override `.env` which override `config.toml`.
 - `config.py` validates all required fields at startup and fails fast with `ConfigError`.
@@ -64,7 +65,7 @@ Agent response text is buffered in `_agent_buffer` and printed in one shot via `
 
 ### Model providers
 
-Both mlx-audio and mlx-vlm expose OpenAI-compatible APIs. We reuse the SDK's existing `OpenAISTTModel`, `OpenAITTSModel`, and `OpenAIChatCompletionsModel` by pointing `AsyncOpenAI` clients at localhost. No custom model subclasses needed except `StreamingTTSModel` which adds `stream=True` to the TTS request for server-side streaming.
+All local LLM backends (mlx-vlm, mlx-lm, llamacpp) expose OpenAI-compatible APIs. We reuse the SDK's existing `OpenAISTTModel`, `OpenAITTSModel`, and `OpenAIChatCompletionsModel` by pointing `AsyncOpenAI` clients at localhost. No custom model subclasses needed except `StreamingTTSModel` which adds `stream=True` to the TTS request for server-side streaming.
 
 ### TranscriptVoiceWorkflow
 
@@ -105,13 +106,21 @@ Environment variable substitution (`${VAR_NAME}`) is supported in all string val
 
 ### Server management (local mode)
 
-`ServerManager` handles the full lifecycle:
+`ServerManager` handles the full lifecycle for the audio server (always mlx-audio) and one of three LLM backends:
+- **mlx-vlm**: Python module (`mlx_vlm.server`), supports `--kv-bits`/`--kv-quant-scheme`, health via `/v1/models`
+- **mlx-lm**: Python module (`mlx_lm.server`), health via `/v1/models`
+- **llamacpp**: Native binary (`./llamacpp/llama-server`), models configured via `--models-preset models.ini`, health via `/health`
+
+Lifecycle:
 1. Check/install system deps (brew packages from `model_deps.toml`)
-2. Check/install pip packages (`mlx-audio[server,tts,stt]`, `mlx-vlm`, model-specific deps)
-3. Patch known compatibility issues (misaki/espeak.py for Kokoro TTS)
-4. Start server subprocesses with stdout redirected to `logs/`
-5. Poll `/v1/models` endpoint until healthy (10 min timeout for model downloads)
-6. On exit: SIGTERM -> wait 5s -> SIGKILL
+2. Check/install pip packages (`mlx-audio[server,tts,stt]`, mlx LLM package if applicable)
+3. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
+4. Patch known compatibility issues (misaki/espeak.py for Kokoro TTS)
+5. Start server subprocesses with stdout redirected to `logs/`
+6. Poll health endpoint until healthy (10 min timeout for model downloads)
+7. On exit: SIGTERM -> wait 5s -> SIGKILL
+
+Config is organized into server-type subsections in `config.toml`. The `[local]` section has shared fields (`llm_server`, `llm_url`, `audio_url`), and each `[local.<server>]` subsection has its own `llm_model` and server-specific flags. Code loads from the active subsection based on `llm_server`.
 
 ### Partial history on interruption
 
@@ -134,6 +143,8 @@ uv run python -m voice-agent  # Run
 - **Rich Live + stdout**: Don't use `sys.stdout.write()` for content that should scroll above the footer. Use `display._print()`. Raw stdout writes will conflict with Live's cursor positioning.
 - **Rich markup in agent text**: Agent responses may contain `[brackets]` (e.g., `[laugh]`). Always use `rich.markup.escape()` before passing agent text to Rich, or it will silently strip the bracketed content.
 - **Config defaults**: There are no hardcoded defaults in `config.py`. All values must come from `config.toml` or environment variables. Adding a new config field requires adding it to both `config.toml` and `load_settings()`.
+- **Config subsections**: LLM model config lives in `[local.<server>]` subsections (e.g., `[local.mlx-vlm]`). The active subsection is determined by `local.llm_server`. When adding server-specific fields, put them in the right subsection, not in `[local]`.
+- **llamacpp preset file**: `models.ini` is gitignored (user-specific, like `.env`). The `models.ini.example` provides the template. The `llm_model` in `[local.llamacpp]` must match a model alias defined in the preset file.
 - **MCP server lifecycle**: Servers are loaded once in `pipeline.run()` and the same instances are passed to the Agent. Never call `load_mcp_servers()` in multiple places -- it creates separate disconnected instances.
 - **VAD runs in background**: `VADRecorder.run()` is a long-running async task. It must yield frequently (`await asyncio.sleep()`) or the event loop starves other tasks.
 - **Blocking calls**: Any blocking I/O (key reads, HTTP calls) must use `run_in_executor` or async equivalents. Blocking the event loop freezes the VAD.
