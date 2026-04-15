@@ -239,7 +239,7 @@ async def run(settings: Settings | None = None) -> None:
             return
 
     # Connect MCP servers
-    mcp_servers = load_mcp_servers()
+    mcp_servers = load_mcp_servers() if settings.enable_mcp else []
     for server in mcp_servers:
         try:
             await server.connect()

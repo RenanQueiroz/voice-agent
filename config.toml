@@ -1,6 +1,8 @@
 [general]
 voice_mode = "local"
 input_mode = "vad"
+# Enable MCP tool servers (defined in mcp_servers.toml). Some models may not support tool use.
+enable_mcp = false
 
 [cloud]
 stt_model = "gpt-4o-transcribe"
@@ -12,12 +14,11 @@ tts_voice = "alloy"
 stt_model = "mlx-community/whisper-large-v3-turbo-asr-8bit"
 #tts_model = "mlx-community/Kokoro-82M-bf16"
 tts_model = "mlx-community/chatterbox-turbo-4bit"
-#llm_model = "mlx-community/gemma-4-e4b-it-4bit"
-llm_model = "mlx-community/gpt-oss-20b-MXFP4-Q4"
 #tts_voice = "af_heart"
-audio_url = "http://localhost:8000"
-llm_server = "mlx-lm"          # "mlx-vlm" for vision models, "mlx-lm" for text-only
+llm_model = "mlx-community/gemma-4-e4b-it-4bit"
+llm_server = "mlx-vlm"          # "mlx-vlm" for vision models, "mlx-lm" for text-only
 llm_url = "http://localhost:8080"
+audio_url = "http://localhost:8000"
 
 [vad]
 # 0-3: higher = more aggressive at filtering non-speech, but more false positives

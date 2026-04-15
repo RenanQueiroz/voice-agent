@@ -87,6 +87,9 @@ class Settings:
     vad_silence_ms: int
     vad_energy_threshold: int
 
+    # Features
+    enable_mcp: bool
+
     # Display
     show_transcript: bool
     show_metrics: bool
@@ -181,6 +184,7 @@ def load_settings() -> Settings:
         vad_energy_threshold=int(
             _get("VAD_ENERGY_THRESHOLD", vad.get("energy_threshold"))
         ),
+        enable_mcp=_get("ENABLE_MCP", general.get("enable_mcp")).lower() == "true",
         show_transcript=_get("SHOW_TRANSCRIPT", display.get("show_transcript")).lower()
         == "true",
         show_metrics=_get("SHOW_METRICS", display.get("show_metrics")).lower()
