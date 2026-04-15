@@ -1,0 +1,10 @@
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Environment variables file
+.env
+
+# Llamacpp files
+llama.cpp/
