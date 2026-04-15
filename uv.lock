@@ -2542,6 +2542,7 @@ dependencies = [
 [package.optional-dependencies]
 local = [
     { name = "mlx-audio", extra = ["server", "stt", "tts"] },
+    { name = "mlx-lm" },
     { name = "mlx-vlm" },
 ]
 
@@ -2555,6 +2556,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mlx-audio", extras = ["server", "tts", "stt"], marker = "extra == 'local'" },
+    { name = "mlx-lm", marker = "extra == 'local'" },
     { name = "mlx-vlm", marker = "extra == 'local'" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "openai", specifier = ">=2.0.0,<3" },

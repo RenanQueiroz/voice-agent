@@ -348,7 +348,7 @@ class Display:
             msg = (
                 "Could not reach the local servers.\n\n"
                 f"  STT/TTS: [cyan]{settings.mlx_audio_url}[/]\n"
-                f"  LLM:     [cyan]{settings.mlx_vlm_url}[/]"
+                f"  LLM:     [cyan]{settings.mlx_llm_url}[/]"
             )
         else:
             msg = "Could not reach the OpenAI API.\nCheck your internet connection and OPENAI_API_KEY in .env"

@@ -16,7 +16,8 @@ tts_model = "mlx-community/chatterbox-turbo-4bit"
 llm_model = "mlx-community/gpt-oss-20b-MXFP4-Q4"
 #tts_voice = "af_heart"
 audio_url = "http://localhost:8000"
-vlm_url = "http://localhost:8080"
+llm_server = "mlx-lm"          # "mlx-vlm" for vision models, "mlx-lm" for text-only
+llm_url = "http://localhost:8080"
 
 [vad]
 # 0-3: higher = more aggressive at filtering non-speech, but more false positives

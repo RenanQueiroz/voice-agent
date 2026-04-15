@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 local = [
     "mlx-audio[server,tts,stt]",
+    "mlx-lm",
     "mlx-vlm",
 ]
 

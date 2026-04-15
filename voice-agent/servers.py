@@ -161,10 +161,15 @@ class ServerManager:
             __import__("mlx_audio")
         except ImportError:
             packages.append("mlx-audio[server,tts,stt]")
+
+        # Install the right LLM server based on config
+        llm_server = self.settings.mlx_llm_server or "mlx-vlm"
+        llm_import = "mlx_vlm" if llm_server == "mlx-vlm" else "mlx_lm"
+        llm_pip = "mlx-vlm" if llm_server == "mlx-vlm" else "mlx-lm"
         try:
-            __import__("mlx_vlm")
+            __import__(llm_import)
         except ImportError:
-            packages.append("mlx-vlm")
+            packages.append(llm_pip)
 
         for model in [self.settings.tts_model, self.settings.stt_model]:
             for dep in self._deps_for_model(model):
@@ -262,11 +267,16 @@ class ServerManager:
         """Start both servers and wait for them to be healthy. Returns True if ready."""
         s = self.settings
         assert s.mlx_audio_url is not None  # validated in load_settings
-        assert s.mlx_vlm_url is not None
+        assert s.mlx_llm_url is not None
+        assert s.mlx_llm_server is not None
         audio_url = s.mlx_audio_url
-        vlm_url = s.mlx_vlm_url
+        llm_url = s.mlx_llm_url
+        llm_server = s.mlx_llm_server  # "mlx-vlm" or "mlx-lm"
         audio_port = self._parse_port(audio_url)
-        vlm_port = self._parse_port(vlm_url)
+        llm_port = self._parse_port(llm_url)
+
+        # Determine the Python module for the LLM server
+        llm_module = "mlx_vlm.server" if llm_server == "mlx-vlm" else "mlx_lm.server"
 
         self.display.server_setup_start()
 
@@ -288,25 +298,25 @@ class ServerManager:
             f"mlx-audio (port {audio_port})",
         )
 
-        vlm_proc = self._start_process(
+        llm_proc = self._start_process(
             [
                 sys.executable,
                 "-m",
-                "mlx_vlm.server",
+                llm_module,
                 "--model",
                 s.llm_model,
                 "--port",
-                str(vlm_port),
+                str(llm_port),
             ],
-            f"mlx-vlm (port {vlm_port})",
+            f"{llm_server} (port {llm_port})",
         )
 
-        audio_ok, vlm_ok = await asyncio.gather(
+        audio_ok, llm_ok = await asyncio.gather(
             self._wait_for_health(audio_url, "mlx-audio", audio_proc),
-            self._wait_for_health(vlm_url, "mlx-vlm", vlm_proc),
+            self._wait_for_health(llm_url, llm_server, llm_proc),
         )
 
-        if audio_ok and vlm_ok:
+        if audio_ok and llm_ok:
             self.display.server_all_ready()
             return True
 

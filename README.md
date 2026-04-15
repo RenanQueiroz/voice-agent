@@ -120,7 +120,8 @@ tts_model = "mlx-community/Kokoro-82M-bf16"
 llm_model = "mlx-community/gemma-4-e4b-it-4bit"
 tts_voice = "af_heart"      # optional, some models don't need one
 audio_url = "http://localhost:8000"
-vlm_url = "http://localhost:8080"
+llm_server = "mlx-vlm"     # "mlx-vlm" for vision models, "mlx-lm" for text-only
+llm_url = "http://localhost:8080"
 
 [vad]
 aggressiveness = 2          # 0-3, higher = more aggressive filtering
@@ -269,6 +270,15 @@ When running in local mode, server logs are saved to `logs/`:
 - `logs/mlx-vlm_port_8080.log` -- LLM server
 
 API errors automatically display the relevant server log tail.
+
+### Choosing between mlx-lm and mlx-vlm
+
+The `llm_server` setting in `[local]` controls which server runs the LLM:
+
+- **`mlx-vlm`**: For vision-language models (gemma-4, qwen2-vl, etc.)
+- **`mlx-lm`**: For text-only models (gpt-oss, llama, qwen, etc.)
+
+If your model isn't supported by one, try the other. Both expose the same OpenAI-compatible API.
 
 ### VAD too sensitive / not sensitive enough
 

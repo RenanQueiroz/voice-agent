@@ -62,9 +62,10 @@ class Settings:
     # Cloud
     openai_api_key: str | None
 
-    # Local server URLs
+    # Local server config
     mlx_audio_url: str | None
-    mlx_vlm_url: str | None
+    mlx_llm_url: str | None
+    mlx_llm_server: str | None  # "mlx-vlm" or "mlx-lm"
 
     # Cloud model names
     cloud_stt_model: str | None
@@ -159,7 +160,10 @@ def load_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         # Local settings (optional when running cloud)
         mlx_audio_url=_get_optional("MLX_AUDIO_URL", local.get("audio_url")),
-        mlx_vlm_url=_get_optional("MLX_VLM_URL", local.get("vlm_url")),
+        mlx_llm_url=_get_optional(
+            "MLX_LLM_URL", local.get("llm_url") or local.get("vlm_url")
+        ),
+        mlx_llm_server=_get_optional("MLX_LLM_SERVER", local.get("llm_server")),
         # Cloud models (optional when running local)
         cloud_stt_model=_get_optional("CLOUD_STT_MODEL", cloud.get("stt_model")),
         cloud_tts_model=_get_optional("CLOUD_TTS_MODEL", cloud.get("tts_model")),
@@ -194,8 +198,13 @@ def load_settings() -> Settings:
     if settings.voice_mode == "local":
         if not settings.mlx_audio_url:
             raise ConfigError("Missing config: local.audio_url in config.toml")
-        if not settings.mlx_vlm_url:
-            raise ConfigError("Missing config: local.vlm_url in config.toml")
+        if not settings.mlx_llm_url:
+            raise ConfigError("Missing config: local.llm_url in config.toml")
+        if settings.mlx_llm_server not in ("mlx-vlm", "mlx-lm"):
+            raise ConfigError(
+                f"Invalid local.llm_server: '{settings.mlx_llm_server}'"
+                " (must be 'mlx-vlm' or 'mlx-lm')"
+            )
     if settings.voice_mode == "cloud" and not settings.openai_api_key:
         raise ConfigError("Missing config: OPENAI_API_KEY in .env")
 

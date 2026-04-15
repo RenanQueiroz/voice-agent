@@ -144,7 +144,7 @@ def create_agent(
 ) -> Agent:
     if settings.voice_mode == "local":
         client = AsyncOpenAI(
-            base_url=f"{settings.mlx_vlm_url}/v1",
+            base_url=f"{settings.mlx_llm_url}/v1",
             api_key="not-needed",
         )
         model = OpenAIChatCompletionsModel(
