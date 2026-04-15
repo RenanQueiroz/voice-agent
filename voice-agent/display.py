@@ -118,6 +118,9 @@ class Display:
 
         # Line 3: Controls
         bar.append("\n ")
+        if self._state in ("responding", "processing"):
+            bar.append("Space", style="bold yellow")
+            bar.append(" interrupt  ", style="dim")
         bar.append("M", style="bold yellow")
         bar.append(" mute  ", style="dim")
         bar.append("Q", style="bold yellow")

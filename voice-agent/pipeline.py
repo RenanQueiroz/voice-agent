@@ -112,11 +112,13 @@ async def _run_vad(
     display.listening()
 
     quit_event = asyncio.Event()
+    interrupt_event = asyncio.Event()
     muted = False
+    responding = False
     current_task: asyncio.Task[None] | None = None
 
     async def check_keys() -> None:
-        nonlocal muted
+        nonlocal muted, responding
         loop = asyncio.get_event_loop()
         while not quit_event.is_set():
             key = await loop.run_in_executor(None, read_key)
@@ -129,8 +131,11 @@ async def _run_vad(
                     recorder.mute()
                     display.muted()
                 else:
-                    recorder.unmute()
+                    if not responding:
+                        recorder.unmute()
                     display.unmuted()
+            if key == " " and responding:
+                interrupt_event.set()
 
     # Start background tasks
     key_task = asyncio.create_task(check_keys())
@@ -147,20 +152,15 @@ async def _run_vad(
             if quit_event.is_set():
                 break
 
-            # Interrupt current turn if one is running
-            if current_task and not current_task.done():
-                player.stop()
-                current_task.cancel()
-                try:
-                    await current_task
-                except asyncio.CancelledError:
-                    pass
-                workflow.save_partial_history()
-                display.interrupted()
-
             display.processing(len(segment) / settings.sample_rate)
 
-            # Start new turn as a cancellable task
+            # Mute VAD during response to prevent echo from speakers
+            responding = True
+            interrupt_event.clear()
+            if not muted:
+                recorder.mute()
+
+            # Run the turn
             current_task = asyncio.create_task(
                 _process_turn(
                     segment,
@@ -173,14 +173,33 @@ async def _run_vad(
                 )
             )
 
-            # When the turn completes normally, show listening state
-            current_task.add_done_callback(
-                lambda _t: (
-                    display.listening()
-                    if not quit_event.is_set() and not muted
-                    else None
-                )
+            # Wait for either turn completion or interruption
+            interrupt_task = asyncio.create_task(interrupt_event.wait())
+            done, _ = await asyncio.wait(
+                [current_task, interrupt_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
+
+            if interrupt_task in done:
+                # User pressed Space to interrupt
+                player.stop()
+                current_task.cancel()
+                try:
+                    await current_task
+                except asyncio.CancelledError:
+                    pass
+                workflow.save_partial_history()
+                display.interrupted()
+            else:
+                interrupt_task.cancel()
+
+            # Resume VAD
+            responding = False
+            if not muted:
+                recorder.unmute()
+                display.listening()
+            else:
+                display.muted()
     finally:
         # Clean up all tasks
         if current_task and not current_task.done():
