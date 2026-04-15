@@ -263,8 +263,13 @@ class Display:
 
     def agent_end(self) -> None:
         if self._agent_streaming:
+            self._agent_buffer = self._agent_buffer.strip()
             if self._agent_buffer:
-                self._print(f"\n  [bold magenta]Agent:[/] {self._agent_buffer}")
+                # Escape brackets so Rich doesn't interpret [laugh] etc. as markup
+                from rich.markup import escape
+
+                escaped = escape(self._agent_buffer)
+                self._print(f"\n  [bold magenta]Agent:[/] {escaped}")
             self._agent_streaming = False
             self._agent_buffer = ""
 
