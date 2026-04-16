@@ -203,9 +203,11 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         self.turn_start_time: float = 0.0
         self._partial_response = ""
         self.pending_audio_input: AudioInput | None = None
+        self._background_transcription: str | None = None
 
     def display_background_transcription(self, text: str, stt_seconds: float) -> None:
         """Called by AudioPassthroughSTTModel when background STT completes."""
+        self._background_transcription = text
         if text and self.show_transcript:
             self.display.user_said(
                 text, stt_seconds=stt_seconds if self.show_metrics else 0.0
@@ -294,6 +296,20 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         # Update history and agent (replicate parent logic)
         self._input_history = result.to_input_list()
         self._current_agent = result.last_agent
+
+        # Replace audio content in history with text transcription to prevent
+        # the base64 audio blob from bloating context on subsequent LLM calls
+        if self._background_transcription:
+            for item in self._input_history:
+                if not isinstance(item, dict) or item.get("role") != "user":
+                    continue
+                content = item.get("content")  # type: ignore[union-attr]
+                if isinstance(content, list) and any(
+                    isinstance(p, dict) and p.get("type") == "input_audio"
+                    for p in content
+                ):
+                    item["content"] = self._background_transcription  # type: ignore[index]
+            self._background_transcription = None
 
         self.last_metrics.llm_seconds = time.monotonic() - llm_start
         self.last_metrics.llm_tokens = token_count

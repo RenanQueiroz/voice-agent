@@ -40,8 +40,8 @@ preset = "models.ini"            # path to llama-server --models-preset INI file
 # 0.5 is default. Raise to 0.6-0.7 in noisy environments.
 threshold = 0.5
 # Milliseconds of silence after speech before triggering processing.
-# Lower = more responsive, but may cut off mid-pause. 300ms is snappy.
-silence_ms = 300
+# Lower = more responsive, but may cut off mid-pause.
+silence_ms = 500
 
 [display]
 # Show real-time transcription of user speech and agent response in the console.
