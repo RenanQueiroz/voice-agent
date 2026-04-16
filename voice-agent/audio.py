@@ -7,6 +7,7 @@ import termios
 import threading
 import time
 import tty
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -84,7 +85,7 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
 
 
 def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
-    """Downsample 24kHz int16 audio to 16kHz for webrtcvad."""
+    """Downsample 24kHz int16 audio to 16kHz for Silero VAD."""
     n = len(audio) - (len(audio) % 3)
     trimmed = audio[:n].reshape(-1, 3)
     s0 = trimmed[:, 0]
@@ -94,21 +95,60 @@ def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
     return np.column_stack([s0, s1]).flatten()
 
 
+_PROJECT_ROOT = Path(__file__).parent.parent
+
+
 class VADRecorder:
     """Continuously listens to the microphone and pushes complete speech segments
-    to a queue using webrtcvad for voice activity detection."""
+    to a queue using Silero VAD (ONNX) for voice activity detection."""
 
     def __init__(self, settings: Settings, display: Display):
-        import webrtcvad
+        import onnxruntime
 
         self.sample_rate = settings.sample_rate
-        self.vad = webrtcvad.Vad(settings.vad_aggressiveness)
-        self.silence_threshold = settings.vad_silence_ms // 20
+        self._vad_threshold = settings.vad_threshold
+
+        # Silero VAD requires 512 samples at 16kHz (32ms chunks)
+        self._frame_duration_ms = 32
+        self.silence_threshold = settings.vad_silence_ms // self._frame_duration_ms
+
         self._muted = False
-        self._energy_threshold = settings.vad_energy_threshold
         self._display = display
         self._stream: sd.InputStream | None = None
         self.segments: asyncio.Queue[np.ndarray] = asyncio.Queue()
+
+        # Load Silero VAD ONNX model
+        model_path = _PROJECT_ROOT / "whispercpp" / "models" / "silero_vad.onnx"
+        opts = onnxruntime.SessionOptions()
+        opts.inter_op_num_threads = 1
+        opts.intra_op_num_threads = 1
+        self._ort = onnxruntime.InferenceSession(str(model_path), sess_options=opts)
+
+        # Model state: single tensor [2, 1, 128]
+        self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._sr = np.array(16000, dtype=np.int64)
+        # Context window: 64 samples prepended to each chunk (required by model)
+        self._context = np.zeros(64, dtype=np.float32)
+
+    def _silero_predict(self, frame_16k: np.ndarray) -> float:
+        """Run Silero VAD on a 512-sample 16kHz frame. Returns speech probability."""
+        audio_f32 = frame_16k.astype(np.float32) / 32768.0
+        # Prepend context from previous chunk (model requires this overlap)
+        x = np.concatenate([self._context, audio_f32]).reshape(1, -1)
+        ort_inputs = {
+            "input": x,
+            "state": self._state,
+            "sr": self._sr,
+        }
+        out, state_new = self._ort.run(None, ort_inputs)
+        self._state[:] = state_new
+        self._context[:] = audio_f32[-64:]
+        return float(out.item())
+
+    def _reset_vad_state(self) -> None:
+        """Reset model state between speech segments."""
+        self._state[:] = 0
+        self._context[:] = 0
 
     def _open_stream(self) -> sd.InputStream:
         if self._stream is None or self._stream.closed:
@@ -133,17 +173,17 @@ class VADRecorder:
 
     async def run(self, quit_event: asyncio.Event) -> None:
         """Continuous background task. Detects speech segments and pushes them to self.segments."""
-        frame_duration_ms = 20
+        frame_duration_ms = self._frame_duration_ms
+        # 32ms at 24kHz = 768 samples, downsampled to 16kHz = 512 samples (Silero requirement)
         frame_samples = int(self.sample_rate * frame_duration_ms / 1000)
-        frame_16k_samples = int(16000 * frame_duration_ms / 1000)
+        frame_16k_samples = 512
 
         # Require this many consecutive speech frames before we start buffering.
-        # Filters out transient noises like key clicks, mouse scrolls.
-        # 3 frames = 60ms -- short enough to not clip speech onset.
+        # 3 frames at 32ms = 96ms -- short enough to not clip speech onset.
         speech_start_threshold = 3
 
         # Pre-roll: keep last N frames so we don't clip speech onset
-        pre_roll_size = 5  # 5 frames = 100ms of audio before speech was detected
+        pre_roll_size = 3  # 3 frames = ~96ms of audio before speech was detected
         from collections import deque
 
         while not quit_event.is_set():
@@ -154,6 +194,7 @@ class VADRecorder:
             speech_frame_count = 0
             silence_count = 0
             is_speaking = False
+            self._reset_vad_state()
 
             while not quit_event.is_set():
                 if self._muted:
@@ -172,9 +213,8 @@ class VADRecorder:
 
                 frame_16k = _downsample_24k_to_16k(frame_24k)[:frame_16k_samples]
 
-                rms = int(np.sqrt(np.mean(frame_24k.astype(np.int32) ** 2)))
-                vad_says_speech = self.vad.is_speech(frame_16k.tobytes(), 16000)
-                is_speech = vad_says_speech and rms > self._energy_threshold
+                speech_prob = self._silero_predict(frame_16k)
+                is_speech = speech_prob > self._vad_threshold
 
                 if not is_speaking:
                     if is_speech:
@@ -186,7 +226,7 @@ class VADRecorder:
                             speech_buffer.extend(pre_roll)
                             speech_buffer.extend(pending_frames)
                             pending_frames.clear()
-                            self._display.vad_speaking(rms)
+                            self._display.vad_speaking(int(speech_prob * 100))
                     else:
                         # Reset -- noise was transient
                         speech_frame_count = 0
@@ -200,7 +240,7 @@ class VADRecorder:
                     if is_speech:
                         speech_buffer.append(frame_24k)
                         silence_count = 0
-                        self._display.vad_speaking(rms)
+                        self._display.vad_speaking(int(speech_prob * 100))
                     else:
                         speech_buffer.append(frame_24k)
                         silence_count += 1

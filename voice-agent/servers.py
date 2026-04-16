@@ -243,7 +243,8 @@ class ServerManager:
         model_file = _PROJECT_ROOT / "whispercpp" / "models" / f"ggml-{stt_model}.bin"
         setup_script = _PROJECT_ROOT / "setup-whispercpp.sh"
 
-        if whisper_bin.exists() and model_file.exists():
+        vad_onnx = _PROJECT_ROOT / "whispercpp" / "models" / "silero_vad.onnx"
+        if whisper_bin.exists() and model_file.exists() and vad_onnx.exists():
             return True
 
         if not setup_script.exists():

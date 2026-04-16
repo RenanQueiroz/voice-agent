@@ -34,16 +34,12 @@ llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models
 preset = "models.ini"            # path to llama-server --models-preset INI file
 
 [vad]
-# 0-3: higher = more aggressive at filtering non-speech, but more false positives
-# from ambient noise. 2 is a good balance for most environments.
-aggressiveness = 2
+# Speech probability threshold (0.0-1.0). Higher = fewer false triggers.
+# 0.5 is default. Raise to 0.6-0.7 in noisy environments.
+threshold = 0.5
 # Milliseconds of silence after speech before triggering processing.
 # Lower = more responsive, but may cut off mid-pause. 500ms is conversational.
 silence_ms = 500
-# Minimum RMS energy to count a frame as speech (even if webrtcvad says yes).
-# Filters out low-level ambient noise. Run debug_vad.py to calibrate for your mic.
-# Typical: ambient ~10, speech 50-500+.
-energy_threshold = 60
 
 [display]
 # Show real-time transcription of user speech and agent response in the console.

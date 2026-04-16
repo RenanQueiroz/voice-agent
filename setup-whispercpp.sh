@@ -117,6 +117,21 @@ fi
 
 echo
 
+# --- Download Silero VAD ONNX model (for Python-side VAD) ---
+
+SILERO_ONNX="$MODELS_DIR/silero_vad.onnx"
+SILERO_ONNX_URL="https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx"
+if [ -f "$SILERO_ONNX" ]; then
+    echo "Silero VAD ONNX model already exists, skipping download."
+else
+    echo "Downloading Silero VAD ONNX model..."
+    curl -fL --progress-bar -o "$SILERO_ONNX" "$SILERO_ONNX_URL"
+    echo "Silero VAD ONNX model downloaded."
+    UPDATED=1
+fi
+
+echo
+
 if [ "$UPDATED" -eq 0 ]; then
     echo "Everything is already up to date."
 else
@@ -124,4 +139,5 @@ else
     echo "  Binary:    $INSTALL_DIR/whisper-server"
     echo "  Model:     $MODEL_FILE"
     echo "  VAD model: $VAD_FILE"
+    echo "  Silero ONNX: $SILERO_ONNX"
 fi

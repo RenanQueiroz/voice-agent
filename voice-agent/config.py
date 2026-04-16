@@ -88,9 +88,8 @@ class Settings:
     tool_call_filler: str | None
 
     # VAD
-    vad_aggressiveness: int
+    vad_threshold: float
     vad_silence_ms: int
-    vad_energy_threshold: int
 
     # Features
     enable_mcp: bool
@@ -200,11 +199,8 @@ def load_settings() -> Settings:
         tool_call_filler=_get_optional(
             "TOOL_CALL_FILLER", agent.get("tool_call_filler")
         ),
-        vad_aggressiveness=int(_get("VAD_AGGRESSIVENESS", vad.get("aggressiveness"))),
+        vad_threshold=float(_get("VAD_THRESHOLD", vad.get("threshold"))),
         vad_silence_ms=int(_get("VAD_SILENCE_MS", vad.get("silence_ms"))),
-        vad_energy_threshold=int(
-            _get("VAD_ENERGY_THRESHOLD", vad.get("energy_threshold"))
-        ),
         enable_mcp=_get("ENABLE_MCP", general.get("enable_mcp")).lower() == "true",
         show_transcript=_get("SHOW_TRANSCRIPT", display.get("show_transcript")).lower()
         == "true",
