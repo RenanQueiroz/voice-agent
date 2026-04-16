@@ -140,10 +140,10 @@ class VADRecorder:
             "state": self._state,
             "sr": self._sr,
         }
-        out, state_new = self._ort.run(None, ort_inputs)
-        self._state[:] = state_new
+        ort_out = self._ort.run(None, ort_inputs)
+        self._state = np.array(ort_out[1])
         self._context[:] = audio_f32[-64:]
-        return float(out.item())
+        return float(np.array(ort_out[0]).item())
 
     def _reset_vad_state(self) -> None:
         """Reset model state between speech segments."""
@@ -182,8 +182,10 @@ class VADRecorder:
         # 3 frames at 32ms = 96ms -- short enough to not clip speech onset.
         speech_start_threshold = 3
 
-        # Pre-roll: keep last N frames so we don't clip speech onset
-        pre_roll_size = 3  # 3 frames = ~96ms of audio before speech was detected
+        # Pre-roll: keep last N frames so we don't clip speech onset.
+        # 8 frames × 32ms = 256ms — generous buffer since Silero VAD
+        # may confirm speech slightly after the actual onset.
+        pre_roll_size = 8
         from collections import deque
 
         while not quit_event.is_set():

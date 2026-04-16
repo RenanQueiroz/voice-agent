@@ -70,6 +70,7 @@ class Settings:
     mlx_kv_bits: str | None  # KV cache quantization bits (mlx-vlm only)
     mlx_kv_quant_scheme: str | None  # KV cache quantization scheme (mlx-vlm only)
     llamacpp_preset: str | None  # path to llama-server models preset INI file
+    llm_audio_input: bool  # LLM model accepts audio input directly
 
     # Cloud model names
     cloud_stt_model: str | None
@@ -184,6 +185,10 @@ def load_settings() -> Settings:
             "MLX_KV_QUANT_SCHEME", llm_section.get("kv_quant_scheme")
         ),
         llamacpp_preset=_get_optional("LLAMACPP_PRESET", llm_section.get("preset")),
+        llm_audio_input=str(
+            _get_optional("LLM_AUDIO_INPUT", llm_section.get("audio_input")) or ""
+        ).lower()
+        == "true",
         # Cloud models (optional when running local)
         cloud_stt_model=_get_optional("CLOUD_STT_MODEL", cloud.get("stt_model")),
         cloud_tts_model=_get_optional("CLOUD_TTS_MODEL", cloud.get("tts_model")),

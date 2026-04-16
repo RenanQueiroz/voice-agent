@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import os
 import platform
 import re
 import time
+import wave
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-
-import io
-import wave
 
 import httpx
 import numpy as np
@@ -129,6 +130,60 @@ class WhisperCppSTTModel(STTModel):
         )
 
 
+class AudioPassthroughSTTModel(STTModel):
+    """Pass-through STT that stores audio on the workflow for direct LLM input.
+
+    When the LLM supports audio input, this skips the STT latency from the
+    critical path. The real STT runs in the background for transcript display.
+    """
+
+    def __init__(
+        self,
+        workflow: TranscriptVoiceWorkflow,
+        real_stt: WhisperCppSTTModel,
+    ):
+        self._workflow = workflow
+        self._real_stt = real_stt
+
+    @property
+    def model_name(self) -> str:
+        return self._real_stt.model_name
+
+    async def transcribe(
+        self,
+        input: AudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> str:
+        # Store audio for the workflow to send directly to LLM
+        self._workflow.pending_audio_input = input
+        # Fire real STT in background for transcript display
+        asyncio.create_task(self._background_stt(input, settings, time.monotonic()))
+        return ""
+
+    async def _background_stt(
+        self, input: AudioInput, settings: STTModelSettings, start_time: float
+    ) -> None:
+        try:
+            text = await self._real_stt.transcribe(input, settings, False, False)
+            elapsed = time.monotonic() - start_time
+            self._workflow.display_background_transcription(text, elapsed)
+        except Exception:
+            pass
+
+    async def create_session(
+        self,
+        input: StreamedAudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> StreamedTranscriptionSession:
+        raise NotImplementedError(
+            "Streamed sessions not supported by AudioPassthroughSTTModel"
+        )
+
+
 class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
     """Wraps SingleAgentVoiceWorkflow to print transcriptions in real-time."""
 
@@ -148,22 +203,44 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         self.last_metrics = TurnMetrics()
         self.turn_start_time: float = 0.0
         self._partial_response = ""
+        self.pending_audio_input: AudioInput | None = None
+
+    def display_background_transcription(self, text: str, stt_seconds: float) -> None:
+        """Called by AudioPassthroughSTTModel when background STT completes."""
+        if text and self.show_transcript:
+            self.display.user_said(
+                text, stt_seconds=stt_seconds if self.show_metrics else 0.0
+            )
+        self.last_metrics.stt_seconds = stt_seconds
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
         transcription = transcription.strip()
         self.last_metrics = TurnMetrics()
         self._partial_response = ""
 
-        # STT time = time from pipeline.run() start to now (when transcription arrives)
-        if self.turn_start_time > 0:
-            self.last_metrics.stt_seconds = time.monotonic() - self.turn_start_time
-
-        stt_display = self.last_metrics.stt_seconds if self.show_metrics else 0.0
-        if self.show_transcript:
-            self.display.user_said(transcription, stt_seconds=stt_display)
-
-        # Add transcription to history (replicate parent logic)
-        self._input_history.append({"role": "user", "content": transcription})
+        # Build user message — multimodal with audio or text-only
+        if self.pending_audio_input is not None:
+            # Audio-input mode: send audio directly to LLM, skip STT latency
+            audio_input = self.pending_audio_input
+            self.pending_audio_input = None
+            _, wav_buf, _ = audio_input.to_audio_file()
+            audio_b64 = base64.b64encode(wav_buf.getvalue()).decode()
+            content: list[dict] = [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": audio_b64, "format": "wav"},
+                }
+            ]
+            self._input_history.append({"role": "user", "content": content})  # type: ignore[arg-type]
+            # STT runs in background — display handled by display_background_transcription
+        else:
+            # Normal text mode: STT already ran
+            if self.turn_start_time > 0:
+                self.last_metrics.stt_seconds = time.monotonic() - self.turn_start_time
+            stt_display = self.last_metrics.stt_seconds if self.show_metrics else 0.0
+            if self.show_transcript:
+                self.display.user_said(transcription, stt_seconds=stt_display)
+            self._input_history.append({"role": "user", "content": transcription})
 
         llm_start = time.monotonic()
         token_count = 0
@@ -373,9 +450,14 @@ def create_pipeline(
         )
 
     # For local mode, use WhisperCppSTTModel for whisper.cpp server
-    stt_model: str | WhisperCppSTTModel = settings.stt_model
+    stt_model: str | STTModel = settings.stt_model
     if settings.voice_mode == "local" and settings.stt_url:
-        stt_model = WhisperCppSTTModel(settings.stt_model, settings.stt_url)
+        whisper_stt = WhisperCppSTTModel(settings.stt_model, settings.stt_url)
+        if settings.llm_audio_input:
+            # Audio-input mode: pass audio directly to LLM, STT runs in background
+            stt_model = AudioPassthroughSTTModel(workflow, whisper_stt)
+        else:
+            stt_model = whisper_stt
 
     pipeline = VoicePipeline(
         workflow=workflow,
