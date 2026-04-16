@@ -40,8 +40,8 @@ preset = "models.ini"            # path to llama-server --models-preset INI file
 # 0.5 is default. Raise to 0.6-0.7 in noisy environments.
 threshold = 0.5
 # Milliseconds of silence after speech before triggering processing.
-# Lower = more responsive, but may cut off mid-pause. 500ms is conversational.
-silence_ms = 500
+# Lower = more responsive, but may cut off mid-pause. 300ms is snappy.
+silence_ms = 300
 
 [display]
 # Show real-time transcription of user speech and agent response in the console.
@@ -57,9 +57,11 @@ no bullet points, no numbered lists, no asterisks, no bold/italic, no markdown, 
 Use plain sentences only. When listing things, say them in a natural sentence.
 If you don't know the answer, say you don't know.
 
-IMPORTANT: Before calling a tool, say a short sentence about what you're about to do. 
+IMPORTANT: 
+Before calling a tool, say a short sentence about what you're about to do, and then do the tool call, both part of the same turn. 
 Tool calls can take a while to run, so we need to give the user some feedback before they need to wait. 
 For example, say "Let me check that for you" before a search tool call, or "I'll pull up the calendar" before a calendar tool call.
+Do this as many times as needed for as many tool calls as needed until you are able to complete the user's request. Then you can end the turn.
 """
 
 # Phrase spoken while waiting for tool calls as fallback if the model hasn't generated any text. Leave empty to disable.

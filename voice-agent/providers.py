@@ -88,6 +88,7 @@ class WhisperCppSTTModel(STTModel):
     def __init__(self, model_name: str, server_url: str):
         self._model_name = model_name
         self._server_url = server_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
     def model_name(self) -> str:
@@ -108,15 +109,13 @@ class WhisperCppSTTModel(STTModel):
         }
         if settings.language:
             fields["language"] = settings.language
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._server_url}/inference",
-                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
-                data=fields,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return data.get("text", "").strip()
+        resp = await self._client.post(
+            f"{self._server_url}/inference",
+            files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+            data=fields,
+        )
+        resp.raise_for_status()
+        return resp.json().get("text", "").strip()
 
     async def create_session(
         self,
@@ -223,8 +222,9 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             # Audio-input mode: send audio directly to LLM, skip STT latency
             audio_input = self.pending_audio_input
             self.pending_audio_input = None
-            _, wav_buf, _ = audio_input.to_audio_file()
-            audio_b64 = base64.b64encode(wav_buf.getvalue()).decode()
+            # Downsample to 16kHz to reduce payload (~33% smaller)
+            wav_bytes = _resample_wav_16k(audio_input)
+            audio_b64 = base64.b64encode(wav_bytes).decode()
             content: list[dict] = [
                 {
                     "type": "input_audio",

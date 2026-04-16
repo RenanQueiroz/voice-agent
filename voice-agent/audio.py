@@ -179,8 +179,8 @@ class VADRecorder:
         frame_16k_samples = 512
 
         # Require this many consecutive speech frames before we start buffering.
-        # 3 frames at 32ms = 96ms -- short enough to not clip speech onset.
-        speech_start_threshold = 3
+        # 2 frames at 32ms = 64ms -- Silero VAD is accurate enough for a lower threshold.
+        speech_start_threshold = 2
 
         # Pre-roll: keep last N frames so we don't clip speech onset.
         # 8 frames × 32ms = 256ms — generous buffer since Silero VAD
