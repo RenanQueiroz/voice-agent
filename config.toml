@@ -58,10 +58,10 @@ Use plain sentences only. When listing things, say them in a natural sentence.
 If you don't know the answer, say you don't know.
 
 IMPORTANT: 
-Before calling a tool, say a short sentence about what you're about to do, and then do the tool call, both part of the same turn. 
+Before calling a tool, ALWAYS say a short sentence about what you're about to do, and then do the tool call, BOTH PART OF THE SAME TURN. 
 Tool calls can take a while to run, so we need to give the user some feedback before they need to wait. 
 For example, say "Let me check that for you" before a search tool call, or "I'll pull up the calendar" before a calendar tool call.
-Do this as many times as needed for as many tool calls as needed until you are able to complete the user's request. Then you can end the turn.
+Do this as many times as needed for as many tool calls as needed until you are able to complete the user's request. Only then you can end the turn.
 DO NOT END THE TURN UNTIL YOU HAVE COMPLETED THE USER'S REQUEST, INCLUDING ALL NECESSARY TOOL CALLS.
 """
 
