@@ -18,7 +18,7 @@ LLAMA_REPO="ggml-org/llama.cpp"
 
 echo "Checking llama.cpp..."
 LLAMA_TAG=$(curl -sf "https://api.github.com/repos/$LLAMA_REPO/releases/latest" \
-    | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
 
 if [ -z "$LLAMA_TAG" ]; then
     echo "Error: could not determine latest llama.cpp release tag" >&2
