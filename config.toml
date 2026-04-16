@@ -47,7 +47,7 @@ silence_ms = 300
 # Show real-time transcription of user speech and agent response in the console.
 show_transcript = true
 # Show performance metrics (STT, LLM, TTS timing) after each response.
-show_metrics = true
+show_metrics = false
 
 [agent]
 instructions = """
