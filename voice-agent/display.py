@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import sys
+import textwrap
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
@@ -37,6 +40,7 @@ class Display:
     def __init__(self) -> None:
         self.console = console
         self._agent_streaming = False
+        self._agent_text: Text | None = None  # Live-rendered streaming text
         self._live: Live | None = None
         self._settings: Settings | None = None
         self._state = "idle"
@@ -137,7 +141,24 @@ class Display:
 
     def _update_footer(self) -> None:
         if self._live:
-            self._live.update(self._render_footer())
+            footer = self._render_footer()
+            if self._agent_text is not None:
+                self._live.update(Group(self._render_agent_block(), footer))
+            else:
+                self._live.update(footer)
+
+    def _wrap(self, text: str, prefix_width: int) -> str:
+        """Pre-wrap text with hanging indent so continuation lines align."""
+        width = self.console.width or 80
+        indent = " " * prefix_width
+        wrapped = textwrap.fill(
+            text,
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=indent,
+        )
+        # Strip the initial indent — the caller adds the real prefix (label + style)
+        return wrapped.lstrip()
 
     def _print(self, *args: object, **kwargs: object) -> None:  # type: ignore[override]
         """Print above the footer."""
@@ -259,7 +280,9 @@ class Display:
         self._print(f"\n  [dim]Tool:[/] [yellow]{name}[/][dim]({args_short})[/]")
 
     def tool_result(self, output: str) -> None:
-        self._print(f"  [dim]Result: {output}[/]\n")
+        #                    "  Result: " = 10 chars
+        wrapped = self._wrap(output, 10)
+        self._print(f"  [dim]Result: {wrapped}[/]")
 
     def interrupted(self) -> None:
         self._print("[dim]  -- interrupted[/]")
@@ -267,29 +290,61 @@ class Display:
     # ── Transcription ────────────────────────────────────────
 
     def user_said(self, text: str, stt_seconds: float = 0.0) -> None:
-        self._print(f"\n  [bold cyan]You:[/] {text}")
+        #                "  You: " = 7 chars
+        wrapped = self._wrap(text, 7)
+        self._print(f"\n  [bold cyan]You:[/] {wrapped}")
         if stt_seconds > 0:
             self._print(f"  [dim]STT {stt_seconds:.1f}s[/]")
 
     def agent_start(self) -> None:
         self._agent_streaming = True
-        self._agent_buffer = ""
+        self._agent_text = Text("  ")
+        self._agent_text.append("Agent: ", style="bold magenta")
         self._set_state("responding")
 
     def agent_chunk(self, text: str) -> None:
-        self._agent_buffer += text
+        if self._agent_text is not None:
+            self._agent_text.append(text)
+            self._update_footer()
+
+    def _render_agent_block(self) -> Group:
+        """Render the streaming agent text with proper hanging indent for Live display.
+
+        Uses a borderless Rich Table so continuation lines align with the content
+        column — Rich handles wrapping natively without the word-boundary snapping
+        that textwrap.fill causes when tokens arrive mid-word.
+        """
+        if self._agent_text is None:
+            return Group(Text())
+        plain = self._agent_text.plain
+        if plain.startswith("  Agent: "):
+            content = plain[len("  Agent: ") :]
+        else:
+            content = plain
+        table = Table(
+            show_header=False, show_edge=False, box=None, padding=0, expand=True
+        )
+        table.add_column(width=9, no_wrap=True)
+        table.add_column()
+        label = Text("  ")
+        label.append("Agent: ", style="bold magenta")
+        table.add_row(label, Text(content))
+        return Group(table, Text())
 
     def agent_end(self) -> None:
         if self._agent_streaming:
-            self._agent_buffer = self._agent_buffer.strip()
-            if self._agent_buffer:
-                # Escape brackets so Rich doesn't interpret [laugh] etc. as markup
-                from rich.markup import escape
-
-                escaped = escape(self._agent_buffer)
-                self._print(f"\n  [bold magenta]Agent:[/] {escaped}")
+            if self._agent_text is not None:
+                plain = self._agent_text.plain.strip()
+                # Remove the "Agent: " prefix we added for live display
+                if plain.startswith("Agent:"):
+                    plain = plain[len("Agent:") :].strip()
+                if plain:
+                    #                    "  Agent: " = 9 chars
+                    wrapped = self._wrap(escape(plain), 9)
+                    self._print(f"\n  [bold magenta]Agent:[/] {wrapped}")
+                self._agent_text = None
+                self._update_footer()
             self._agent_streaming = False
-            self._agent_buffer = ""
 
     # ── Metrics ──────────────────────────────────────────────
 
