@@ -291,7 +291,9 @@ class AudioPlayer:
                     if first_byte_time == 0.0:
                         first_byte_time = time.monotonic() - tts_start
                     if not self._stopped:
-                        self._player.write(event.data)
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._player.write, event.data
+                        )
                 elif event.type == "voice_stream_event_lifecycle":
                     if event.event == "turn_started":
                         display.turn_started()
