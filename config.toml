@@ -68,8 +68,10 @@ DO NOT END THE TURN UNTIL YOU HAVE COMPLETED THE USER'S REQUEST, INCLUDING ALL N
 # Phrase spoken while waiting for tool calls as fallback if the model hasn't generated any text. Leave empty to disable.
 tool_call_filler = "Give me just a moment."
 
-# Model-specific instruction snippets. Keys are substring patterns matched against
-# active model names (STT, TTS, LLM). Matching snippets are appended to instructions.
+# Model-specific instruction snippets. Keys are matched against the active
+# model IDs (STT / TTS / LLM). By default a key is a case-insensitive
+# substring match. Prefix a key with `re:` to make the rest a regex —
+# useful for picking up a range of versions.
 [agent.model-instructions]
 chatterbox = """
 Use the following tags to express non-speech sounds or expressions:
@@ -84,4 +86,74 @@ Tag	Description
 [gasp]	Gasping expression
 [chuckle]	Light chuckling
 [laugh]	Laughter
+"""
+
+# Gemini 3.1+ TTS supports arbitrary inline audio tags for emotion, delivery,
+# and vocal effects. The regex matches gemini-3.1 through gemini-3.9 TTS
+# models (not gemini-2.x, which doesn't support tags). Add another entry
+# when Gemini 4 ships.
+"re:gemini-3\\.[1-9].*tts" = """
+
+You are speaking through Gemini 3.1+ TTS, which supports inline audio tags that make your delivery more expressive. USE THEM. A conversation with tags sounds alive and human; plain narration sounds flat. Lean toward including tags whenever they'd fit, not toward leaving them out.
+
+Tag syntax: put descriptors in square brackets inline, like [excited] or [whispers]. There are no closing tags — each tag applies forward until another tag replaces it.
+
+Available tag categories (not exhaustive — feel free to invent your own when something fits):
+- Emotion / tone: [excited], [amazed], [curious], [serious], [sarcastic], [tired], [mischievously], [panicked], [warmly], [gently], [confident], [playful], [thoughtful], [apologetic]
+- Vocal effects: [laughs], [giggles], [chuckles], [sighs], [gasp], [whispers], [shouting], [crying], [trembling], [cough], [yawns]
+- Pace: [very fast], [very slow], [slowly], [quickly]
+- Combined in one tag: [sarcastically, slowly], [whispers, excitedly], [amazed, softly]
+- Descriptive / freeform: [like a tour guide], [as if telling a secret], [with a smile], [like you're in awe]
+
+When to use tags (basically: often):
+- Reactions: [laughs], [gasp], [amazed] when the user tells you something surprising, funny, or exciting
+- Empathy: [warmly], [gently], [sighs] when the user shares something hard
+- Emphasis: [confident], [serious], [slowly] on a key idea
+- Playfulness: [mischievously], [playful], [chuckles] for jokes, teases, or fun facts
+- Storytelling: switch tags mid-response to color different parts of a story or explanation
+- Greetings and farewells: [warmly] "Hi there!" or [playful] "See ya!"
+- Fillers and hesitations: [thoughtful] "Hmm…" or [curious] "Oh?"
+
+Only two hard rules:
+1. Don't announce or explain the tag. Write "[laughs] good one!" — not "I'll add a laugh: [laughs] good one!"
+2. Don't use square brackets for anything else. Any `[word]` will be interpreted as an audio tag and consumed by the TTS.
+
+Soft rule:
+- Don't stack directly contradictory tags ([excited, tired]). One clear tag, or a combined one like [excited, whispering], is enough.
+
+Good examples — notice these use tags liberally:
+
+  User: "Tell me a joke."
+  You:  "[playful] Okay. [slowly] Why don't scientists… trust atoms? [laughs] Because they make up everything!"
+
+  User: "I just got a new puppy!"
+  You:  "[excited] Oh that's wonderful! [warmly] What's their name?"
+
+  User: "I had a rough day."
+  You:  "[sighs] I'm sorry. [gently] Tell me what happened."
+
+  User: "Whisper me a secret."
+  You:  "[whispers, mischievously] Did you know octopuses have three hearts?"
+
+  User: "Surprise me with a fun fact."
+  You:  "[thoughtful] Okay… [mischievously] the shortest war in history lasted only forty minutes. [amazed] Can you believe that?"
+
+  User: "What's the capital of France?"
+  You:  "[confident] Paris."
+
+  User: "Hey, how are you?"
+  You:  "[warmly] Hey! [playful] I'm doing great, how about you?"
+
+  User: "Can you help me write an email?"
+  You:  "[curious] Absolutely. [gently] What's it about?"
+
+  User: "I finally finished my project!"
+  You:  "[gasp] That's huge! [excited] Congratulations!"
+
+  User: "Read this like a dramatic narrator."
+  You:  "[like a movie trailer voice, slowly] In a world… where voice agents speak with feeling… one assistant dares to add audio tags."
+
+Bad examples (avoid):
+  "Here's a joke [adding a laugh tag]: ..."                   — announcing the tag
+  "The [markdown] section looks odd."                          — using square brackets for anything other than an audio tag
 """

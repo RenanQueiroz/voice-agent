@@ -471,14 +471,30 @@ def load_settings() -> Settings:
 
     _validate_active_requirements(settings)
 
-    # Append model-specific instruction snippets for whatever's currently active.
+    # Append model-specific instruction snippets for whatever's currently
+    # active. Keys are matched case-insensitively against the active model
+    # IDs (STT / LLM / TTS). Prefix a key with `re:` to interpret the rest
+    # as a regex; otherwise it's a substring match.
+    import re as _re
+
     active_model_names = [
         settings.stt_model.lower(),
         settings.tts_model.lower(),
         settings.llm_model.lower(),
     ]
     for pattern, text in settings.model_instruction_snippets.items():
-        if any(pattern in m for m in active_model_names):
+        if pattern.startswith("re:"):
+            try:
+                rx = _re.compile(pattern[3:], _re.IGNORECASE)
+            except _re.error as e:
+                raise ConfigError(
+                    f"[agent.model-instructions] invalid regex "
+                    f"{pattern!r}: {e}"
+                ) from e
+            matched = any(rx.search(m) for m in active_model_names)
+        else:
+            matched = any(pattern.lower() in m for m in active_model_names)
+        if matched:
             settings.agent_instructions += text
 
     return settings
