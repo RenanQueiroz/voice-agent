@@ -13,6 +13,7 @@ dependencies = [
     "sounddevice>=0.5",
     "onnxruntime>=1.16.1",
     "webrtcvad-wheels>=2.0.14",
+    "textual>=1.0.0",
 ]
 
 [project.optional-dependencies]

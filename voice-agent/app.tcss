@@ -1,0 +1,172 @@
+/* ── App-wide ─────────────────────────────────────────── */
+
+Screen {
+    background: $surface;
+}
+
+#conversation {
+    padding: 1 2 0 2;
+    background: $surface;
+}
+
+/* ── Turn cards ───────────────────────────────────────── */
+
+UserTurn, AgentTurn, ToolCard, ErrorCard {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+}
+
+UserTurn {
+    border: round $primary-lighten-1;
+}
+
+UserTurn > .label {
+    color: $primary-lighten-3;
+    text-style: bold;
+}
+
+UserTurn > .stt {
+    color: $text-muted;
+    text-style: dim;
+}
+
+AgentTurn {
+    border: round $accent;
+}
+
+AgentTurn > .label {
+    color: $accent-lighten-2;
+    text-style: bold;
+}
+
+AgentTurn > #body {
+    height: auto;
+    padding: 0 0;
+    color: $text;
+}
+
+AgentTurn > .metrics {
+    color: $text-muted;
+    text-style: dim;
+}
+
+AgentTurn.-interrupted > #body {
+    color: $text-muted;
+}
+
+ToolCard {
+    border: round $warning;
+    color: $text-muted;
+}
+
+ToolCard > .label {
+    color: $warning;
+    text-style: bold;
+}
+
+ErrorCard {
+    border: round $error;
+}
+
+ErrorCard > .label {
+    color: $error;
+    text-style: bold;
+}
+
+/* ── Status footer ────────────────────────────────────── */
+
+StatusFooter {
+    dock: bottom;
+    height: auto;
+    width: 100%;
+    background: $panel;
+    border-top: solid $primary-darken-2;
+}
+
+StateRow {
+    height: auto;
+    width: 100%;
+    padding: 0 2;
+    color: $text;
+}
+
+ModelRow {
+    height: auto;
+    width: 100%;
+    padding: 0 2;
+    color: $text-muted;
+    text-style: dim;
+}
+
+ToolsRow {
+    height: auto;
+    width: 100%;
+    padding: 0 2;
+    color: $text-muted;
+    text-style: dim;
+}
+
+ControlRow {
+    height: 3;
+    width: 100%;
+    padding: 0 1;
+    margin-top: 1;
+    align-horizontal: center;
+}
+
+ControlRow > Button {
+    margin: 0 1;
+    min-width: 20;
+}
+
+ControlRow > Button.-hidden {
+    display: none;
+}
+
+/* ── Splash screen ────────────────────────────────────── */
+
+SplashScreen {
+    align: center middle;
+    background: $surface;
+}
+
+#splash-panel {
+    width: 70;
+    height: auto;
+    max-height: 80%;
+    border: round $accent;
+    padding: 1 2;
+    background: $panel;
+}
+
+#splash-title {
+    width: 100%;
+    content-align: center middle;
+    color: $accent;
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+
+#splash-servers {
+    height: auto;
+    padding: 0 0 1 0;
+}
+
+#splash-servers > ServerRow {
+    height: 1;
+    width: 100%;
+}
+
+#splash-log {
+    height: auto;
+    max-height: 10;
+    color: $text-muted;
+    text-style: dim;
+}
+
+#splash-log > Static {
+    height: 1;
+    width: 100%;
+}

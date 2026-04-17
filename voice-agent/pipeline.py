@@ -11,13 +11,12 @@ from openai import APIConnectionError
 from agents import set_tracing_disabled
 from agents.voice import AudioInput
 
-from .audio import AudioPlayer, VADRecorder, read_key, record_push_to_talk
-from .config import Settings, load_settings
-from .display import Display
-from .mcp import load_mcp_servers
+from .audio import AudioPlayer, VADRecorder, record_push_to_talk
+from .config import Settings
 from .providers import TranscriptVoiceWorkflow, create_pipeline
 
 if TYPE_CHECKING:
+    from .app import VoiceAgentApp
     from .servers import ServerManager
 
 logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
@@ -28,7 +27,7 @@ async def _process_turn(
     segment: bytes | object,
     workflow: TranscriptVoiceWorkflow,
     pipeline: object,
-    display: Display,
+    app: VoiceAgentApp,
     player: AudioPlayer,
     settings: Settings,
     server_manager: ServerManager | None,
@@ -42,125 +41,121 @@ async def _process_turn(
 
     try:
         result = await pipeline.run(audio_input)  # type: ignore[union-attr]
-        tts_total, tts_first = await player.play(result, display)
+        tts_total, tts_first = await player.play(result, app)
 
         if settings.show_metrics:
             m = workflow.last_metrics
             m.tts_seconds = tts_total
             m.tts_first_byte_seconds = tts_first
             m.total_seconds = time.monotonic() - turn_start
-            display.metrics(m)
+            app.metrics(m)
     except APIConnectionError:
-        display.connection_error(settings)
+        app.connection_error(settings)
     except httpx.RemoteProtocolError:
-        display.tts_stream_error()
+        app.tts_stream_error()
         if server_manager:
-            display.api_error_with_logs(
+            app.api_error_with_logs(
                 "TTS stream interrupted", server_manager.get_all_server_logs()
             )
     except openai.AuthenticationError as e:
-        display.auth_error(e.message)
+        app.auth_error(e.message)
     except openai.RateLimitError as e:
-        display.rate_limit_error(e.message)
+        app.rate_limit_error(e.message)
     except openai.APIError as e:
         if server_manager:
-            display.api_error_with_logs(e.message, server_manager.get_all_server_logs())
+            app.api_error_with_logs(e.message, server_manager.get_all_server_logs())
         else:
-            display.api_error(e.message)
+            app.api_error(e.message)
 
 
 async def _run_push_to_talk(
     settings: Settings,
-    display: Display,
+    app: VoiceAgentApp,
     server_manager: ServerManager | None = None,
     mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, display, mcp_servers=mcp_servers)
+    workflow, pipeline = create_pipeline(settings, app, mcp_servers=mcp_servers)
     player = AudioPlayer()
-    display.ready_banner(settings)
+    app.ready_banner(settings)
 
-    while True:
-        display.ready_for_key()
-        while True:
-            key = read_key()
-            if key == "k":
-                break
-            if key == "q":
-                return
-            await asyncio.sleep(0)
+    while not app.quit_event.is_set():
+        app.ready_for_key()
+        # Wait for K (queued by the app's binding) or quit
+        await app.record_key_queue.get()
+        if app.quit_event.is_set():
+            return
 
-        display.recording_start()
-        buffer = await record_push_to_talk(settings)
+        app.recording_start()
+        buffer = await record_push_to_talk(
+            settings, app.record_key_queue, app.quit_event
+        )
+        if app.quit_event.is_set():
+            return
 
         if len(buffer) < settings.sample_rate * 0.5:
-            display.recording_too_short()
+            app.recording_too_short()
             continue
 
-        display.processing(len(buffer) / settings.sample_rate)
+        app.processing(len(buffer) / settings.sample_rate)
         await _process_turn(
-            buffer, workflow, pipeline, display, player, settings, server_manager
+            buffer, workflow, pipeline, app, player, settings, server_manager
         )
+        app.listening()
 
 
 async def _run_vad(
     settings: Settings,
-    display: Display,
+    app: VoiceAgentApp,
     server_manager: ServerManager | None = None,
     mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, display, mcp_servers=mcp_servers)
-    recorder = VADRecorder(settings, display)
+    workflow, pipeline = create_pipeline(settings, app, mcp_servers=mcp_servers)
+    recorder = VADRecorder(settings, app)
     player = AudioPlayer()
-    display.ready_banner(settings)
-    display.listening()
+    app.ready_banner(settings)
+    app.listening()
 
-    quit_event = asyncio.Event()
-    interrupt_event = asyncio.Event()
-    muted = False
-    responding = False
+    # Watch app.is_muted and mirror it onto the recorder.
+    async def mute_watcher() -> None:
+        last = app.is_muted
+        # Apply initial state
+        if last:
+            recorder.mute()
+        while not app.quit_event.is_set():
+            await asyncio.sleep(0.05)
+            if app.is_muted == last:
+                continue
+            last = app.is_muted
+            if app.is_muted:
+                recorder.mute()
+            else:
+                # Only resume listening when we're not in the middle of a
+                # response (VAD is always muted during response to prevent
+                # echo from the speakers feeding back into the mic).
+                if not app.responding:
+                    recorder.unmute()
+
     current_task: asyncio.Task[None] | None = None
-
-    async def check_keys() -> None:
-        nonlocal muted, responding
-        loop = asyncio.get_event_loop()
-        while not quit_event.is_set():
-            key = await loop.run_in_executor(None, read_key)
-            if key == "q":
-                quit_event.set()
-                return
-            if key == "m":
-                muted = not muted
-                if muted:
-                    recorder.mute()
-                    display.muted()
-                else:
-                    if not responding:
-                        recorder.unmute()
-                    display.unmuted()
-            if key == " " and responding:
-                interrupt_event.set()
-
-    # Start background tasks
-    key_task = asyncio.create_task(check_keys())
-    vad_task = asyncio.create_task(recorder.run(quit_event))
+    mute_task = asyncio.create_task(mute_watcher())
+    vad_task = asyncio.create_task(recorder.run(app.quit_event))
 
     try:
-        while not quit_event.is_set():
+        while not app.quit_event.is_set():
             # Wait for next speech segment from VAD
             try:
                 segment = await asyncio.wait_for(recorder.segments.get(), timeout=0.5)
             except TimeoutError:
                 continue
 
-            if quit_event.is_set():
+            if app.quit_event.is_set():
                 break
 
-            display.processing(len(segment) / settings.sample_rate)
+            app.processing(len(segment) / settings.sample_rate)
 
             # Mute VAD during response to prevent echo from speakers
-            responding = True
-            interrupt_event.clear()
-            if not muted:
+            app.responding = True
+            app.interrupt_event.clear()
+            if not app.is_muted:
                 recorder.mute()
 
             # Run the turn
@@ -169,7 +164,7 @@ async def _run_vad(
                     segment,
                     workflow,
                     pipeline,
-                    display,
+                    app,
                     player,
                     settings,
                     server_manager,
@@ -177,14 +172,14 @@ async def _run_vad(
             )
 
             # Wait for either turn completion or interruption
-            interrupt_task = asyncio.create_task(interrupt_event.wait())
+            interrupt_task = asyncio.create_task(app.interrupt_event.wait())
             done, _ = await asyncio.wait(
                 [current_task, interrupt_task],
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
             if interrupt_task in done:
-                # User pressed Space to interrupt
+                # User pressed Space (or clicked Interrupt) to interrupt
                 player.stop()
                 current_task.cancel()
                 try:
@@ -192,17 +187,17 @@ async def _run_vad(
                 except asyncio.CancelledError:
                     pass
                 workflow.save_partial_history()
-                display.interrupted()
+                app.interrupted()
             else:
                 interrupt_task.cancel()
 
             # Resume VAD
-            responding = False
-            if not muted:
+            app.responding = False
+            if not app.is_muted:
                 recorder.unmute()
-                display.listening()
+                app.listening()
             else:
-                display.muted()
+                app.muted()
     finally:
         # Clean up all tasks
         if current_task and not current_task.done():
@@ -211,10 +206,10 @@ async def _run_vad(
                 await current_task
             except asyncio.CancelledError:
                 pass
-        key_task.cancel()
+        mute_task.cancel()
         vad_task.cancel()
         try:
-            await key_task
+            await mute_task
         except asyncio.CancelledError:
             pass
         try:
@@ -223,49 +218,19 @@ async def _run_vad(
             pass
 
 
-async def run(settings: Settings | None = None) -> None:
-    if settings is None:
-        settings = load_settings()
+async def run_pipeline_loops(
+    settings: Settings,
+    app: VoiceAgentApp,
+    server_manager: ServerManager | None,
+    mcp_servers: list,
+) -> None:
+    """Entry point used by VoiceAgentApp._run_pipeline.
 
-    display = Display()
-
-    server_manager = None
-    if settings.voice_mode == "local":
-        from .servers import ServerManager
-
-        server_manager = ServerManager(settings, display)
-        if not await server_manager.start():
-            display.setup_failed()
-            return
-
-    # Connect MCP servers
-    mcp_servers = load_mcp_servers() if settings.enable_mcp else []
-    for server in mcp_servers:
-        try:
-            await server.connect()
-        except Exception as e:
-            display.api_error(f"Failed to connect MCP server '{server.name}': {e}")
-            return
-
-    # Collect tool names for the footer
-    if mcp_servers:
-        all_tool_names: list[str] = []
-        for server in mcp_servers:
-            tools = await server.list_tools()
-            all_tool_names.extend(t.name for t in tools)
-        display.set_mcp_tools(all_tool_names)
-
-    try:
-        if settings.input_mode == "vad":
-            await _run_vad(settings, display, server_manager, mcp_servers)
-        else:
-            await _run_push_to_talk(settings, display, server_manager, mcp_servers)
-    finally:
-        for server in mcp_servers:
-            try:
-                await server.cleanup()
-            except Exception:
-                pass
-        display.stop_footer()
-        if server_manager:
-            server_manager.stop()
+    The heavy-lifting (MCP connect, server startup) is done by the app so it
+    can drive the splash screen — by the time we get here, everything is up
+    and the main UI is visible.
+    """
+    if settings.input_mode == "vad":
+        await _run_vad(settings, app, server_manager, mcp_servers)
+    else:
+        await _run_push_to_talk(settings, app, server_manager, mcp_servers)

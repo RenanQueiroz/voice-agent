@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import select
-import sys
-import termios
-import threading
 import time
-import tty
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,41 +15,14 @@ if TYPE_CHECKING:
 
 CHANNELS = 1
 
-# Shared terminal state so we only set cbreak once
-_term_lock = threading.Lock()
-_term_old: list | None = None
 
-
-def _enter_cbreak() -> None:
-    global _term_old
-    with _term_lock:
-        if _term_old is None:
-            fd = sys.stdin.fileno()
-            _term_old = termios.tcgetattr(fd)
-            tty.setcbreak(fd)
-
-
-def _restore_terminal() -> None:
-    global _term_old
-    with _term_lock:
-        if _term_old is not None:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _term_old)
-            _term_old = None
-
-
-def read_key(timeout: float = 0.2) -> str | None:
-    """Read a single keypress with a timeout. Returns None if no key pressed."""
-    _enter_cbreak()
-    fd = sys.stdin.fileno()
-    ready, _, _ = select.select([fd], [], [], timeout)
-    if ready:
-        return sys.stdin.read(1).lower()
-    return None
-
-
-async def record_push_to_talk(settings: Settings) -> np.ndarray:
-    """Record audio from the microphone until K is pressed again.
-    Raises KeyboardInterrupt if Q is pressed."""
+async def record_push_to_talk(
+    settings: Settings,
+    stop_queue: asyncio.Queue[None],
+    quit_event: asyncio.Event,
+) -> np.ndarray:
+    """Record from the mic until either an item lands on `stop_queue` (K pressed
+    again in the app) or `quit_event` is set (Q pressed)."""
     chunks: list[np.ndarray] = []
 
     stream = sd.InputStream(
@@ -62,24 +30,23 @@ async def record_push_to_talk(settings: Settings) -> np.ndarray:
     )
     stream.start()
 
-    pressed = ""
     try:
-        while True:
+        while not quit_event.is_set():
             if stream.read_available > 0:
                 data, _ = stream.read(stream.read_available)
                 chunks.append(data)
-            key = read_key(timeout=0.02)
-            if key in ("k", "q"):
-                pressed = key
+            # Let the key-queue have a chance to deliver the stop signal
+            try:
+                await asyncio.wait_for(stop_queue.get(), timeout=0.02)
                 break
-            await asyncio.sleep(0)
+            except TimeoutError:
+                continue
     finally:
         stream.stop()
         stream.close()
 
-    if pressed == "q":
-        raise KeyboardInterrupt
-
+    if not chunks:
+        return np.zeros(0, dtype=np.int16)
     recording = np.concatenate(chunks, axis=0).flatten()
     return np.asarray(recording, dtype=np.int16)
 
