@@ -109,7 +109,7 @@ enabled          = true
 # turn this on if you fully trust the model and the prompts you're
 # feeding it. The command still appears in the ToolCard, so you can see
 # what ran, but you can't stop it before it runs.
-auto_approve     = true
+auto_approve     = false
 timeout_seconds  = 30        # kill the command if it runs longer than this
 max_output_bytes = 10000     # truncate stdout/stderr returned to the agent
 # cwd            = "."       # working directory (relative to project root); defaults to project root
