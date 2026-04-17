@@ -75,6 +75,40 @@ ErrorCard > .label {
     text-style: bold;
 }
 
+ApprovalCard {
+    border: round $warning;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    height: auto;
+    width: 100%;
+}
+
+ApprovalCard > .label {
+    color: $warning;
+    text-style: bold;
+}
+
+ApprovalCard > .body {
+    color: $text;
+    padding: 0 0 1 0;
+}
+
+ApprovalCard > .decision {
+    color: $text-muted;
+    text-style: dim;
+}
+
+ApprovalCard .approval-buttons {
+    height: 3;
+    width: 100%;
+    align-horizontal: left;
+}
+
+ApprovalCard .approval-buttons > Button {
+    margin: 0 1 0 0;
+    min-width: 14;
+}
+
 /* ── Status footer ────────────────────────────────────── */
 
 StatusFooter {

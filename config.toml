@@ -97,6 +97,17 @@ show_metrics    = true
 [audio]
 sample_rate = 24000
 
+# ── Shell tool (opt-in) ───────────────────────────────────
+# When enabled, the agent can propose shell commands. Every invocation
+# requires your explicit approval in the UI (click Approve/Decline or
+# press Y / N). The command runs with your current user permissions, so
+# keep this off unless you actually want the agent to drive the shell.
+[shell]
+enabled          = false
+timeout_seconds  = 30        # kill the command if it runs longer than this
+max_output_bytes = 10000     # truncate stdout/stderr returned to the agent
+# cwd            = "."       # working directory (relative to project root); defaults to project root
+
 # ── Agent ─────────────────────────────────────────────────
 [agent]
 instructions = """

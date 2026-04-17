@@ -106,6 +106,16 @@ class ModelConfig:
 
 
 @dataclass
+class ShellConfig:
+    """Optional shell-command tool. Every invocation requires user approval."""
+
+    enabled: bool = False
+    timeout_seconds: int = 30
+    max_output_bytes: int = 10_000
+    cwd: str | None = None  # relative to project root; None = project root
+
+
+@dataclass
 class Settings:
     input_mode: Literal["push_to_talk", "vad"]
     openai_api_key: str | None
@@ -144,6 +154,9 @@ class Settings:
     agent_instructions: str = ""
     tool_call_filler: str | None = None
     model_instruction_snippets: dict[str, str] = field(default_factory=dict)
+
+    # Shell tool (requires user approval per invocation)
+    shell: ShellConfig = field(default_factory=ShellConfig)
 
     # ── Active-model lookups ─────────────────────────────────
 
@@ -258,7 +271,10 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
             fsmax = entry.get("file_search_max_results")
             if fsmax is not None:
                 config.file_search_max_results = int(fsmax)
-            if "file_search" in config.hosted_tools and not config.file_search_vector_stores:
+            if (
+                "file_search" in config.hosted_tools
+                and not config.file_search_vector_stores
+            ):
                 raise ConfigError(
                     f"[[llm]] '{name}' has hosted_tools = ['file_search', ...] "
                     f"but no file_search_vector_stores set."
@@ -326,6 +342,7 @@ def load_settings() -> Settings:
     agent = t.get("agent", {})
     audio = t.get("audio", {})
     display = t.get("display", {})
+    shell_cfg = t.get("shell", {})
 
     input_mode = _get("INPUT_MODE", general.get("input_mode"))
     if input_mode not in ("push_to_talk", "vad"):
@@ -369,6 +386,19 @@ def load_settings() -> Settings:
         model_instruction_snippets={
             str(k): str(v) for k, v in agent.get("model-instructions", {}).items()
         },
+        shell=ShellConfig(
+            enabled=bool(
+                str(
+                    _get_optional("SHELL_ENABLED", shell_cfg.get("enabled")) or "false"
+                ).lower()
+                == "true"
+            ),
+            timeout_seconds=int(shell_cfg.get("timeout_seconds", 30)),
+            max_output_bytes=int(shell_cfg.get("max_output_bytes", 10_000)),
+            cwd=(
+                str(shell_cfg.get("cwd")) if shell_cfg.get("cwd") is not None else None
+            ),
+        ),
     )
 
     _validate_active_requirements(settings)

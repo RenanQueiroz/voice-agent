@@ -23,6 +23,7 @@ from textual.widgets import Button
 from .display import TurnMetrics
 from .widgets import (
     AgentTurn,
+    ApprovalCard,
     ErrorCard,
     ModelRow,
     ModelSwitchScreen,
@@ -58,6 +59,8 @@ class VoiceAgentApp(App[None]):
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("k", "record_key", "Record", show=False),
         Binding("s", "open_settings", "Switch models", show=False),
+        Binding("y", "approve", "Approve", show=False),
+        Binding("n", "decline", "Decline", show=False),
     ]
 
     def __init__(self, settings: Settings) -> None:
@@ -93,6 +96,11 @@ class VoiceAgentApp(App[None]):
         # Serialize switches and keep the pipeline from processing a turn
         # while we're reconciling servers / rebuilding the workflow.
         self._switch_lock = asyncio.Lock()
+
+        # Pending shell-approval card + future. Only one at a time — the
+        # agent's tool call is blocked awaiting this future.
+        self._pending_approval: asyncio.Future[bool] | None = None
+        self._pending_approval_card: ApprovalCard | None = None
 
     # ── Compose & mount ───────────────────────────────────
 
@@ -216,6 +224,43 @@ class VoiceAgentApp(App[None]):
             self.record_key_queue.put_nowait(None)
         except Exception:
             pass
+
+    def action_approve(self) -> None:
+        """Y: approve the pending shell command, if any."""
+        card = self._pending_approval_card
+        if card is not None:
+            card._resolve(True)
+
+    def action_decline(self) -> None:
+        """N: decline the pending shell command, if any."""
+        card = self._pending_approval_card
+        if card is not None:
+            card._resolve(False)
+
+    async def request_shell_approval(self, command: str) -> bool:
+        """Mount an ApprovalCard and block until the user approves or declines.
+
+        Only one approval can be pending at a time — any concurrent request
+        auto-declines to avoid silent overlap.
+        """
+        if self._pending_approval is not None:
+            return False
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        card = ApprovalCard("Shell command", command)
+        self._pending_approval = fut
+        self._pending_approval_card = card
+        self._mount_card(card)
+        try:
+            return await fut
+        finally:
+            self._pending_approval = None
+            self._pending_approval_card = None
+
+    def on_approval_card_decision(self, event: ApprovalCard.Decision) -> None:
+        fut = self._pending_approval
+        if fut is not None and not fut.done():
+            fut.set_result(event.approved)
 
     def action_open_settings(self) -> None:
         """Open the model-switch modal. Blocked while responding."""

@@ -8,6 +8,7 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widget import Widget
@@ -210,6 +211,60 @@ class NoticeCard(Widget):
 
     def compose(self) -> ComposeResult:
         yield Static(escape(self._text))
+
+
+class ApprovalCard(Widget):
+    """Blocks a tool call until the user approves or declines.
+
+    The card posts a `Decision` message (Approve / Decline) when the user
+    clicks a button, presses Y/N, or the card is dismissed by `resolve()`.
+    """
+
+    class Decision(Message):
+        def __init__(self, card: "ApprovalCard", approved: bool) -> None:
+            super().__init__()
+            self.card = card
+            self.approved = approved
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._done = False
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._title, classes="label")
+        yield Static(escape(self._body), classes="body")
+        with Horizontal(classes="approval-buttons"):
+            yield Button("Approve (Y)", id="approve", variant="success")
+            yield Button("Decline (N)", id="decline", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if self._done:
+            return
+        if event.button.id == "approve":
+            self._resolve(True)
+        elif event.button.id == "decline":
+            self._resolve(False)
+
+    def _resolve(self, approved: bool) -> None:
+        if self._done:
+            return
+        self._done = True
+        # Replace the buttons with an inline status so the card stays as a
+        # record of the decision.
+        try:
+            for b in self.query(Button):
+                b.remove()
+            self.mount(
+                Static(
+                    "✓ Approved" if approved else "✗ Declined",
+                    classes="decision",
+                )
+            )
+        except Exception:
+            pass
+        self.post_message(self.Decision(self, approved))
 
 
 # ── Footer ───────────────────────────────────────────────

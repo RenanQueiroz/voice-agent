@@ -366,6 +366,7 @@ def _hosted_tools(llm: ModelConfig) -> list[Tool]:
 def create_agent(
     settings: Settings,
     mcp_servers: list[MCPServer] | None = None,
+    app: object | None = None,
 ) -> Agent:
     llm = settings.llm
     if llm.provider == "local":
@@ -382,12 +383,26 @@ def create_agent(
 
     instructions = _expand_instructions(settings.agent_instructions)
 
+    tools: list[Tool] = list(_hosted_tools(llm))
+
+    if settings.shell.enabled and app is not None:
+        from .shell import create_shell_tool, system_summary
+
+        tools.append(create_shell_tool(app, settings.shell))  # type: ignore[arg-type]
+        instructions += (
+            "\n\nYou can run shell commands via the `run_shell_command` tool. "
+            f"{system_summary()} Every command you propose will be shown to the "
+            "user for explicit approval before running — keep commands short, "
+            "clearly-scoped, and explain what you're about to do before calling "
+            "the tool. If the user declines, accept the decision and move on."
+        )
+
     return Agent(
         name="Assistant",
         instructions=instructions,
         model=model,
         mcp_servers=mcp_servers or [],
-        tools=_hosted_tools(llm),
+        tools=tools,
     )
 
 
@@ -478,7 +493,7 @@ def create_pipeline(
     display: Display,
     mcp_servers: list[MCPServer] | None = None,
 ) -> tuple[TranscriptVoiceWorkflow, VoicePipeline]:
-    agent = create_agent(settings, mcp_servers=mcp_servers)
+    agent = create_agent(settings, mcp_servers=mcp_servers, app=display)
     workflow = TranscriptVoiceWorkflow(
         agent,
         display=display,
