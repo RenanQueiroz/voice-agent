@@ -119,9 +119,9 @@ class VoiceAgentApp(App[None]):
         except Exception:
             return
         s = self.settings
-        row.stt_label = s.stt_model
-        row.llm_label = s.llm_model
-        row.tts_label = s.tts_model
+        row.stt_label = s.stt.name
+        row.llm_label = s.llm.name
+        row.tts_label = s.tts.name
 
     # ── Pipeline worker ───────────────────────────────────
 
