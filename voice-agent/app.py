@@ -238,19 +238,31 @@ class VoiceAgentApp(App[None]):
             card._resolve(False)
 
     async def request_shell_approval(self, command: str) -> bool:
-        """Mount an ApprovalCard and block until the user approves or declines.
+        """Block until the user approves or declines the pending shell command.
 
-        Only one approval can be pending at a time — any concurrent request
-        auto-declines to avoid silent overlap.
+        The `ApprovalCard` is normally mounted by `tool_call()` as soon as
+        the SDK emits the `tool_called` event — that way the card always
+        lands right after the ToolCard in the conversation, no matter how
+        the SDK interleaves tool invocation with the event stream. We just
+        wait here for the future that card stored on the app.
+
+        If no `tool_call` event was seen (direct invocation in tests, or a
+        non-streamed code path), mount a standalone card as a fallback.
         """
-        if self._pending_approval is not None:
-            return False
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future[bool] = loop.create_future()
-        card = ApprovalCard("Shell command", command)
-        self._pending_approval = fut
-        self._pending_approval_card = card
-        self._mount_card(card)
+        # Give the tool_call event handler a moment to set up the card.
+        for _ in range(50):  # up to ~500ms
+            if self._pending_approval is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        fut = self._pending_approval
+        if fut is None:
+            loop = asyncio.get_event_loop()
+            fut = loop.create_future()
+            card = ApprovalCard("Shell command", command)
+            self._pending_approval = fut
+            self._pending_approval_card = card
+            self._mount_card(card)
         try:
             return await fut
         finally:
@@ -420,6 +432,27 @@ class VoiceAgentApp(App[None]):
         card = ToolCard(name, args)
         self._current_tool_card = card
         self._mount_card(card)
+        # If this is a shell command, mount the approval card right after
+        # the ToolCard so the prompt visually follows the call. The shell
+        # tool function awaits the pre-created future via
+        # `request_shell_approval` — this guarantees the UI order is
+        # ToolCard → ApprovalCard regardless of how the SDK interleaves
+        # tool invocation with the event stream.
+        if name == "run_shell_command":
+            import json as _json
+
+            command = args
+            try:
+                parsed = _json.loads(args) if isinstance(args, str) else args
+                if isinstance(parsed, dict) and "command" in parsed:
+                    command = str(parsed["command"])
+            except Exception:
+                pass
+            approval = ApprovalCard("Shell command", command)
+            self._mount_card(approval)
+            loop = asyncio.get_event_loop()
+            self._pending_approval = loop.create_future()
+            self._pending_approval_card = approval
 
     def tool_result(self, output: str) -> None:
         if self._current_tool_card is not None:

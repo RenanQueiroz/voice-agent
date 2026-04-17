@@ -103,7 +103,7 @@ sample_rate = 24000
 # press Y / N). The command runs with your current user permissions, so
 # keep this off unless you actually want the agent to drive the shell.
 [shell]
-enabled          = false
+enabled          = true
 timeout_seconds  = 30        # kill the command if it runs longer than this
 max_output_bytes = 10000     # truncate stdout/stderr returned to the agent
 # cwd            = "."       # working directory (relative to project root); defaults to project root
