@@ -312,6 +312,8 @@ class VoiceAgentApp(App[None]):
         """Apply a new set of active models: reconcile servers, rebuild pipeline."""
         from .providers import create_pipeline
 
+        from .preferences import save_preferences
+
         async with self._switch_lock:
             if self.server_manager is None:
                 return
@@ -323,6 +325,20 @@ class VoiceAgentApp(App[None]):
             self.settings.active_llm = llm
             self.settings.active_tts = tts
 
+            # Persist the user's choice right away so preferences.toml always
+            # reflects the latest selection, even if the local server takes a
+            # long time to come up (or the user kills the app mid-startup).
+            # If reconcile fails below, we revert and re-save the previous
+            # selection so the file stays in sync with what's actually active.
+            try:
+                save_preferences(stt, llm, tts)
+            except Exception as e:
+                self._mount_error(
+                    "Preferences not saved",
+                    f"Could not write preferences.toml: {e}",
+                )
+
+            self._update_models()  # reflect the new names in the footer immediately
             self._set_state("processing")
             notice = NoticeCard("Switching models…")
             self._mount_card(notice)
@@ -333,18 +349,25 @@ class VoiceAgentApp(App[None]):
                 except Exception:
                     pass
 
-            ok = await self.server_manager.reconcile()
-            if not ok:
+            def _rollback(reason_title: str, reason_body: str) -> None:
                 self.settings.active_stt = prev_stt
                 self.settings.active_llm = prev_llm
                 self.settings.active_tts = prev_tts
+                try:
+                    save_preferences(prev_stt, prev_llm, prev_tts)
+                except Exception:
+                    pass
                 _remove_notice()
-                self._mount_error(
+                self._mount_error(reason_title, reason_body)
+                self._update_models()
+                self._set_state("listening")
+
+            ok = await self.server_manager.reconcile()
+            if not ok:
+                _rollback(
                     "Switch failed",
                     "Could not start the required local server. Reverted to previous selection.",
                 )
-                self._update_models()
-                self._set_state("listening")
                 return
 
             try:
@@ -352,28 +375,10 @@ class VoiceAgentApp(App[None]):
                     self.settings, self, mcp_servers=self.mcp_servers
                 )
             except Exception as e:
-                self.settings.active_stt = prev_stt
-                self.settings.active_llm = prev_llm
-                self.settings.active_tts = prev_tts
-                _remove_notice()
-                self._mount_error("Switch failed", str(e))
-                self._update_models()
-                self._set_state("listening")
+                _rollback("Switch failed", str(e))
                 return
 
-            # Persist the new choice
-            try:
-                from .preferences import save_preferences
-
-                save_preferences(stt, llm, tts)
-            except Exception as e:
-                self._mount_error(
-                    "Preferences not saved",
-                    f"Models switched but preferences.toml could not be written: {e}",
-                )
-
             _remove_notice()
-            self._update_models()
             self._set_state("listening")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
