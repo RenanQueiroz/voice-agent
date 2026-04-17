@@ -306,12 +306,12 @@ class ControlRow(Horizontal):
     """Footer control row: clickable Mute / Interrupt / Switch / Quit buttons."""
 
     def compose(self) -> ComposeResult:
-        yield Button("Mute  (M)", id="btn-mute", variant="default")
+        yield Button("Mute (M)", id="btn-mute", variant="default")
         yield Button(
-            "Interrupt  (Space)", id="btn-interrupt", variant="warning", disabled=True
+            "Interrupt (Space)", id="btn-interrupt", variant="warning", disabled=True
         )
-        yield Button("Switch models  (S)", id="btn-switch", variant="default")
-        yield Button("Quit  (Q)", id="btn-quit", variant="error")
+        yield Button("Switch (S)", id="btn-switch", variant="default")
+        yield Button("Quit (Q)", id="btn-quit", variant="error")
 
 
 class StatusFooter(Vertical):

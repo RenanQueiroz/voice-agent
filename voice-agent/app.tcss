@@ -117,8 +117,10 @@ ControlRow {
 }
 
 ControlRow > Button {
+    width: 1fr;             /* share available space equally */
+    min-width: 1;           /* allow shrinking below natural content width */
+    max-width: 28;          /* cap so wide terminals don't inflate them */
     margin: 0 1;
-    min-width: 20;
 }
 
 ControlRow > Button.-hidden {
