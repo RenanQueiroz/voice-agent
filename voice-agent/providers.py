@@ -363,6 +363,9 @@ def _hosted_tools(llm: ModelConfig) -> list[Tool]:
     return tools
 
 
+_GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
 def create_agent(
     settings: Settings,
     mcp_servers: list[MCPServer] | None = None,
@@ -373,6 +376,18 @@ def create_agent(
         client = AsyncOpenAI(
             base_url=f"{settings.llm_url}/v1",
             api_key="not-needed",
+        )
+        model = OpenAIChatCompletionsModel(
+            model=llm.model,
+            openai_client=client,
+        )
+    elif llm.vendor == "gemini":
+        # Gemini exposes an OpenAI-compatible endpoint for chat completions,
+        # so we keep reusing OpenAIChatCompletionsModel — only the base_url
+        # and API key change.
+        client = AsyncOpenAI(
+            base_url=_GEMINI_OPENAI_BASE,
+            api_key=settings.gemini_api_key or "missing",
         )
         model = OpenAIChatCompletionsModel(
             model=llm.model,
@@ -511,7 +526,7 @@ def create_pipeline(
     config = create_pipeline_config(settings)
 
     tts = settings.tts
-    tts_model: str | StreamingTTSModel = tts.model
+    tts_model: object = tts.model
     if tts.provider == "local":
         tts_client = AsyncOpenAI(
             base_url=f"{settings.tts_url}/v1",
@@ -520,6 +535,13 @@ def create_pipeline(
         tts_model = StreamingTTSModel(
             model=tts.model,
             openai_client=tts_client,
+        )
+    elif tts.vendor == "gemini":
+        from .gemini_tts import GeminiTTSModel
+
+        tts_model = GeminiTTSModel(
+            model=tts.model,
+            api_key=settings.gemini_api_key or "missing",
         )
 
     stt = settings.stt

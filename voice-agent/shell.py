@@ -70,7 +70,7 @@ def create_shell_tool(app: VoiceAgentApp, cfg: ShellConfig) -> FunctionTool:
             "safely propose one whenever it helps.\n\n"
             "Common things you can do (examples are for macOS — adapt to the "
             "user's OS as reported in the system prompt):\n"
-            "- Open apps or files: `open -a \"Safari\"`, `open ~/Documents/foo.pdf`.\n"
+            '- Open apps or files: `open -a "Safari"`, `open ~/Documents/foo.pdf`.\n'
             "  (Linux: `xdg-open <path>`.)\n"
             "- Look things up on the web in plain text: `curl -s wttr.in/lisbon?format=3`, "
             "`curl -s https://ipinfo.io/ip`.\n"

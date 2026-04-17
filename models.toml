@@ -50,11 +50,20 @@ name     = "gpt-5.4-mini"
 provider = "cloud"
 model    = "gpt-5.4-mini"
 # OpenAI-hosted tools. Allowed: "web_search", "code_interpreter", "file_search".
-# These only work with cloud LLMs (provider = "cloud"). Leave empty to disable.
+# Only valid on OpenAI cloud LLMs — i.e. `provider = "cloud"` with either no
+# `vendor` field or `vendor = "openai"`. They do NOT work with Gemini or any
+# other vendor (the app rejects this at startup). Leave empty to disable.
 hosted_tools = ["web_search", "code_interpreter"]
 # For hosted_tools = ["file_search", ...], add:
 #   file_search_vector_stores = ["vs_abc123"]
 #   file_search_max_results   = 5
+
+# Gemini via its OpenAI-compatible chat endpoint. Needs GEMINI_API_KEY in .env.
+[[llm]]
+name     = "gemini-3.1-flash-lite-preview"
+provider = "cloud"
+vendor   = "gemini"
+model    = "gemini-3.1-flash-lite-preview"
 
 # ── TTS catalog ───────────────────────────────────────────
 [[tts]]
@@ -73,3 +82,13 @@ name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
 voice    = "alloy"
+
+# Gemini TTS via native generateContent API (not OpenAI-compatible — we wrap it).
+# Needs GEMINI_API_KEY in .env. 
+# Voices: See https://ai.google.dev/gemini-api/docs/speech-generation#voices for the full list.
+[[tts]]
+name     = "gemini-3.1-flash-tts-preview"
+provider = "cloud"
+vendor   = "gemini"
+model    = "gemini-3.1-flash-tts-preview"
+voice    = "Sulafat"

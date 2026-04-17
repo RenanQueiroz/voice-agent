@@ -251,25 +251,34 @@ class AudioPlayer:
         tts_start = time.monotonic()
         first_byte_time = 0.0
         try:
-            async for event in result.stream():
-                if self._stopped:
-                    break
-                if event.type == "voice_stream_event_audio":
-                    if first_byte_time == 0.0:
-                        first_byte_time = time.monotonic() - tts_start
-                    if not self._stopped:
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, self._player.write, event.data
-                        )
-                elif event.type == "voice_stream_event_lifecycle":
-                    if event.event == "turn_started":
-                        display.turn_started()
-                    elif event.event == "turn_ended":
-                        display.turn_ended()
-                    elif event.event == "session_ended":
-                        display.session_ended()
-                elif event.type == "voice_stream_event_error":
-                    display.api_error(str(event.error))
+            try:
+                async for event in result.stream():
+                    if self._stopped:
+                        break
+                    if event.type == "voice_stream_event_audio":
+                        if first_byte_time == 0.0:
+                            first_byte_time = time.monotonic() - tts_start
+                        if not self._stopped:
+                            await asyncio.get_event_loop().run_in_executor(
+                                None, self._player.write, event.data
+                            )
+                    elif event.type == "voice_stream_event_lifecycle":
+                        if event.event == "turn_started":
+                            display.turn_started()
+                        elif event.event == "turn_ended":
+                            display.turn_ended()
+                        elif event.event == "session_ended":
+                            display.session_ended()
+                    elif event.type == "voice_stream_event_error":
+                        display.api_error(str(event.error))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # The SDK re-raises TTS failures (e.g., a Gemini 429) out of
+                # `result.stream()`. Surface those as inline error cards
+                # instead of letting them escape as "Task exception was
+                # never retrieved".
+                display.api_error(f"TTS error: {e}")
         finally:
             if not self._player.closed:
                 self._player.stop()

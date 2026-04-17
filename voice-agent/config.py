@@ -79,9 +79,11 @@ def _get_optional(env_key: str, toml_value: Any) -> str | None:
 Role = Literal["stt", "llm", "tts"]
 Provider = Literal["cloud", "local"]
 LLMServer = Literal["mlx-vlm", "mlx-lm", "llamacpp"]
+Vendor = Literal["openai", "gemini"]
 
 
 HOSTED_TOOL_NAMES = {"web_search", "code_interpreter", "file_search"}
+VENDOR_NAMES = {"openai", "gemini"}
 
 
 @dataclass
@@ -93,12 +95,20 @@ class ModelConfig:
     provider: Provider
     model: str  # cloud model id or local model spec (mlx path / whisper.cpp name / preset alias)
 
+    # Cloud-only: which API vendor serves this model. Defaults to OpenAI when
+    # unset; set to "gemini" to route the request to Google's Generative
+    # Language API (Gemini has an OpenAI-compatible endpoint for LLMs, and
+    # we wrap Gemini's native TTS API in a custom model class).
+    vendor: Vendor | None = None
+
     # TTS-only
     voice: str | None = None
 
     # Local-LLM-only
     server: LLMServer | None = None
-    preset: str | None = None  # llamacpp preset path (llamacpp-models.ini), relative to project root
+    preset: str | None = (
+        None  # llamacpp preset path (llamacpp-models.ini), relative to project root
+    )
     kv_bits: str | None = None
     kv_quant_scheme: str | None = None
     audio_input: bool = False  # LLM accepts audio directly
@@ -135,6 +145,7 @@ class ShellConfig:
 class Settings:
     input_mode: Literal["push_to_talk", "vad"]
     openai_api_key: str | None
+    gemini_api_key: str | None
 
     # Local server endpoints. Required only for roles whose active model is
     # local. Validated lazily.
@@ -248,6 +259,21 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
 
         config = ModelConfig(name=name, role=role, provider=provider, model=model)
 
+        vendor = entry.get("vendor")
+        if vendor is not None:
+            if provider != "cloud":
+                raise ConfigError(
+                    f"[[{role}]] '{name}' has vendor = {vendor!r} but "
+                    f"provider = {provider!r}. The 'vendor' field only "
+                    "applies to cloud models."
+                )
+            if vendor not in VENDOR_NAMES:
+                raise ConfigError(
+                    f"[[{role}]] '{name}' has unknown vendor = {vendor!r}. "
+                    f"Allowed: {sorted(VENDOR_NAMES)}."
+                )
+            config.vendor = vendor
+
         if role == "tts":
             voice = entry.get("voice")
             if voice is not None and not isinstance(voice, str):
@@ -263,6 +289,13 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                     raise ConfigError(
                         f"[[llm]] '{name}' has hosted_tools but provider is "
                         f"'{provider}' — hosted tools only work with cloud OpenAI models."
+                    )
+                if config.vendor is not None and config.vendor != "openai":
+                    raise ConfigError(
+                        f"[[llm]] '{name}' has hosted_tools but vendor = "
+                        f"{config.vendor!r}. Hosted tools (web_search, "
+                        "code_interpreter, file_search) are OpenAI-only — "
+                        "they don't work with Gemini or other vendors."
                     )
                 if not isinstance(hosted_tools, list) or not all(
                     isinstance(t, str) for t in hosted_tools
@@ -389,6 +422,7 @@ def load_settings() -> Settings:
     settings = Settings(
         input_mode=input_mode,  # type: ignore[arg-type]
         openai_api_key=os.getenv("OPENAI_API_KEY"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
         stt_url=_get_optional("STT_URL", local.get("stt_url")),
         tts_url=_get_optional("TTS_URL", local.get("tts_url")),
         llm_url=_get_optional("LLM_URL", local.get("llm_url")),
@@ -422,9 +456,7 @@ def load_settings() -> Settings:
             ),
             auto_approve=bool(
                 str(
-                    _get_optional(
-                        "SHELL_AUTO_APPROVE", shell_cfg.get("auto_approve")
-                    )
+                    _get_optional("SHELL_AUTO_APPROVE", shell_cfg.get("auto_approve"))
                     or "false"
                 ).lower()
                 == "true"
@@ -455,14 +487,24 @@ def load_settings() -> Settings:
 def _validate_active_requirements(settings: Settings) -> None:
     """Check the URL/API-key requirements implied by the current active models."""
     active = [settings.stt, settings.llm, settings.tts]
-    needs_cloud = any(m.provider == "cloud" for m in active)
+    needs_openai = any(
+        m.provider == "cloud" and (m.vendor is None or m.vendor == "openai")
+        for m in active
+    )
+    needs_gemini = any(m.provider == "cloud" and m.vendor == "gemini" for m in active)
     needs_local_stt = settings.stt.provider == "local"
     needs_local_llm = settings.llm.provider == "local"
     needs_local_tts = settings.tts.provider == "local"
 
-    if needs_cloud and not settings.openai_api_key:
+    if needs_openai and not settings.openai_api_key:
         raise ConfigError(
-            "Active selection includes a cloud model but OPENAI_API_KEY is not set (check .env)."
+            "Active selection includes an OpenAI cloud model but "
+            "OPENAI_API_KEY is not set (check .env)."
+        )
+    if needs_gemini and not settings.gemini_api_key:
+        raise ConfigError(
+            "Active selection includes a Gemini cloud model but "
+            "GEMINI_API_KEY is not set (check .env)."
         )
     if needs_local_stt and not settings.stt_url:
         raise ConfigError(
