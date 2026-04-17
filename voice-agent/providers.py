@@ -390,11 +390,18 @@ def create_agent(
 
         tools.append(create_shell_tool(app, settings.shell))  # type: ignore[arg-type]
         instructions += (
-            "\n\nYou can run shell commands via the `run_shell_command` tool. "
-            f"{system_summary()} Every command you propose will be shown to the "
-            "user for explicit approval before running — keep commands short, "
-            "clearly-scoped, and explain what you're about to do before calling "
-            "the tool. If the user declines, accept the decision and move on."
+            "\n\nYou have access to the `run_shell_command` tool, which runs a "
+            f"shell command on the user's computer. {system_summary()} "
+            "When the user asks you to do something on their machine — open an "
+            "app, read or edit a file, look something up with `curl`, play a "
+            "sound, check system info, run a small script, and so on — USE this "
+            "tool rather than saying you can't. The user approves every command "
+            "before it runs, so it's always safe to propose one. "
+            "Before each tool call, say a short sentence about what you're about "
+            "to do (e.g. 'I'll open Safari for you'), then call the tool. After "
+            "the command returns, summarize the result in plain speech — the "
+            "user will hear your reply, not the raw output. Keep commands short "
+            "and scoped; if the user declines, accept it and move on."
         )
 
     return Agent(
