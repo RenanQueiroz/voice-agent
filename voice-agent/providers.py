@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import numpy as np
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Omit
 
 from agents import (
     Agent,
@@ -26,6 +26,7 @@ from agents import (
 )
 from agents.mcp import MCPServer
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 from agents.voice.input import AudioInput, StreamedAudioInput
 from agents.voice.model import (
@@ -35,6 +36,7 @@ from agents.voice.model import (
     TTSModelSettings,
 )
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
+from agents.voice.models.openai_stt import OpenAISTTModel
 from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
 
@@ -363,6 +365,7 @@ def _hosted_tools(llm: ModelConfig) -> list[Tool]:
 
 
 _GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+_OPENAI_BASE = "https://api.openai.com/v1"
 
 
 def create_agent(
@@ -381,19 +384,64 @@ def create_agent(
             openai_client=client,
         )
     elif llm.vendor == "gemini":
+        gemini_key = llm.api_key or settings.gemini_api_key or "missing"
         # Gemini exposes an OpenAI-compatible endpoint for chat completions,
         # so we keep reusing OpenAIChatCompletionsModel — only the base_url
         # and API key change.
+        #
+        # Careful: the OpenAI SDK auto-reads `OPENAI_ORG_ID` /
+        # `OPENAI_PROJECT_ID` from env and attaches `openai-organization` /
+        # `openai-project` headers. Google's gateway treats those as extra
+        # credentials alongside our `Authorization: Bearer` and returns 400
+        # "Multiple authentication credentials received". Passing the
+        # `organization=` / `project=` kwargs as None or "" doesn't help
+        # (the SDK still falls back to the env vars); the only reliable
+        # way to omit them is `default_headers` with `Omit()` sentinels.
+        #
+        # We also scope the httpx client with `trust_env=False` so a system
+        # proxy env var can't inject a third credential either.
+        gemini_http = httpx.AsyncClient(trust_env=False, timeout=60.0)
         client = AsyncOpenAI(
             base_url=_GEMINI_OPENAI_BASE,
-            api_key=settings.gemini_api_key or "missing",
+            api_key=gemini_key,
+            http_client=gemini_http,
+            default_headers={
+                "OpenAI-Organization": Omit(),  # type: ignore[dict-item]
+                "OpenAI-Project": Omit(),  # type: ignore[dict-item]
+            },
         )
         model = OpenAIChatCompletionsModel(
             model=llm.model,
             openai_client=client,
         )
     else:
-        model = llm.model  # type: ignore[assignment]
+        # Cloud OpenAI LLM. We build the client explicitly (instead of
+        # passing just the model name string and letting the SDK use its
+        # default provider) so that leftover env vars — OPENAI_BASE_URL,
+        # OPENAI_ORG_ID, OPENAI_PROJECT_ID — can't redirect the request or
+        # sneak in extra auth headers. Those env vars have actually burned
+        # us: when OPENAI_BASE_URL was set from a prior Gemini experiment,
+        # "gpt-*" string models were being sent to Gemini's gateway and
+        # rejected with "Multiple authentication credentials received".
+        #
+        # We use `OpenAIResponsesModel` (the /responses endpoint) — not
+        # `OpenAIChatCompletionsModel` — because hosted tools (web_search,
+        # code_interpreter, file_search) only work through Responses. The
+        # default string-model path in the SDK also picks Responses.
+        openai_http = httpx.AsyncClient(trust_env=False, timeout=60.0)
+        openai_client = AsyncOpenAI(
+            base_url=_OPENAI_BASE,
+            api_key=llm.api_key or settings.openai_api_key or "missing",
+            http_client=openai_http,
+            default_headers={
+                "OpenAI-Organization": Omit(),  # type: ignore[dict-item]
+                "OpenAI-Project": Omit(),  # type: ignore[dict-item]
+            },
+        )
+        model = OpenAIResponsesModel(
+            model=llm.model,
+            openai_client=openai_client,
+        )
 
     instructions = _expand_instructions(settings.agent_instructions)
 
@@ -570,8 +618,21 @@ def create_pipeline(
 
         tts_model = GeminiTTSModel(
             model=tts.model,
-            api_key=settings.gemini_api_key or "missing",
+            api_key=tts.api_key or settings.gemini_api_key or "missing",
         )
+    elif tts.api_key:
+        # Cloud OpenAI TTS with a per-model key override — bypass the
+        # shared pipeline-level provider (which reads OPENAI_API_KEY) and
+        # build the TTS client explicitly so this key is what's used.
+        tts_client = AsyncOpenAI(
+            api_key=tts.api_key,
+            http_client=httpx.AsyncClient(trust_env=False, timeout=60.0),
+            default_headers={
+                "OpenAI-Organization": Omit(),  # type: ignore[dict-item]
+                "OpenAI-Project": Omit(),  # type: ignore[dict-item]
+            },
+        )
+        tts_model = OpenAITTSModel(model=tts.model, openai_client=tts_client)
 
     stt = settings.stt
     llm = settings.llm
@@ -585,6 +646,17 @@ def create_pipeline(
             stt_model = AudioPassthroughSTTModel(workflow, whisper_stt)
         else:
             stt_model = whisper_stt
+    elif stt.provider == "cloud" and stt.api_key:
+        # Same override rationale as the cloud TTS branch above.
+        stt_client = AsyncOpenAI(
+            api_key=stt.api_key,
+            http_client=httpx.AsyncClient(trust_env=False, timeout=60.0),
+            default_headers={
+                "OpenAI-Organization": Omit(),  # type: ignore[dict-item]
+                "OpenAI-Project": Omit(),  # type: ignore[dict-item]
+            },
+        )
+        stt_model = OpenAISTTModel(model=stt.model, openai_client=stt_client)
 
     pipeline = VoicePipeline(
         workflow=workflow,

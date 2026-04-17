@@ -72,7 +72,10 @@ class GeminiTTSModel(TTSModel):
     def __init__(self, model: str, api_key: str, timeout: float = 60.0):
         self._model = model
         self._api_key = api_key
-        self._client = httpx.AsyncClient(timeout=timeout)
+        # trust_env=False so a system proxy / env-based network config can't
+        # inject a second credential alongside our `x-goog-api-key` header.
+        # Google's gateway rejects requests with more than one credential.
+        self._client = httpx.AsyncClient(trust_env=False, timeout=timeout)
 
     @property
     def model_name(self) -> str:

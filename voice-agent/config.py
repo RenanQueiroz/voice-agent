@@ -15,6 +15,7 @@ Priority (highest wins): environment variables > .env > config.toml.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -85,6 +86,15 @@ Vendor = Literal["openai", "gemini"]
 HOSTED_TOOL_NAMES = {"web_search", "code_interpreter", "file_search"}
 VENDOR_NAMES = {"openai", "gemini"}
 
+_ENV_REF_RE = re.compile(r"\$\{(\w+)\}")
+
+
+def _expand_env(value: str) -> str:
+    """Expand `${VAR_NAME}` references using the current env (post-dotenv).
+    Unknown refs are left literal so the config error surfaces downstream
+    (e.g. "api_key is 'missing'") rather than here."""
+    return _ENV_REF_RE.sub(lambda m: os.environ.get(m.group(1), m.group(0)), value)
+
 
 @dataclass
 class ModelConfig:
@@ -100,6 +110,14 @@ class ModelConfig:
     # Language API (Gemini has an OpenAI-compatible endpoint for LLMs, and
     # we wrap Gemini's native TTS API in a custom model class).
     vendor: Vendor | None = None
+
+    # Cloud-only: per-model API key override. If set, takes precedence over
+    # the vendor-wide key (OPENAI_API_KEY / GEMINI_API_KEY). Useful when one
+    # key is rate-limited or scoped to a subset of models — e.g. a legacy
+    # Gemini key that still works on the LLM endpoint while a newer key
+    # handles TTS. Supports `${VAR_NAME}` env-var expansion so real secrets
+    # never live in the committed models.toml.
+    api_key: str | None = None
 
     # TTS-only
     voice: str | None = None
@@ -258,6 +276,19 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
             raise ConfigError(f"[[{role}]] '{name}' is missing a string 'model' field")
 
         config = ModelConfig(name=name, role=role, provider=provider, model=model)
+
+        api_key = entry.get("api_key")
+        if api_key is not None:
+            if not isinstance(api_key, str):
+                raise ConfigError(
+                    f"[[{role}]] '{name}' has non-string 'api_key': {api_key!r}"
+                )
+            if provider != "cloud":
+                raise ConfigError(
+                    f"[[{role}]] '{name}' has api_key but provider = "
+                    f"{provider!r}. Per-model api_key only applies to cloud models."
+                )
+            config.api_key = _expand_env(api_key)
 
         vendor = entry.get("vendor")
         if vendor is not None:
@@ -475,8 +506,6 @@ def load_settings() -> Settings:
     # active. Keys are matched case-insensitively against the active model
     # IDs (STT / LLM / TTS). Prefix a key with `re:` to interpret the rest
     # as a regex; otherwise it's a substring match.
-    import re as _re
-
     active_model_names = [
         settings.stt_model.lower(),
         settings.tts_model.lower(),
@@ -485,8 +514,8 @@ def load_settings() -> Settings:
     for pattern, text in settings.model_instruction_snippets.items():
         if pattern.startswith("re:"):
             try:
-                rx = _re.compile(pattern[3:], _re.IGNORECASE)
-            except _re.error as e:
+                rx = re.compile(pattern[3:], re.IGNORECASE)
+            except re.error as e:
                 raise ConfigError(
                     f"[agent.model-instructions] invalid regex "
                     f"{pattern!r}: {e}"
@@ -501,26 +530,33 @@ def load_settings() -> Settings:
 
 
 def _validate_active_requirements(settings: Settings) -> None:
-    """Check the URL/API-key requirements implied by the current active models."""
+    """Check the URL/API-key requirements implied by the current active models.
+    A model with its own `api_key` counts as self-sufficient — it doesn't
+    need the vendor-wide env-var fallback."""
     active = [settings.stt, settings.llm, settings.tts]
     needs_openai = any(
-        m.provider == "cloud" and (m.vendor is None or m.vendor == "openai")
+        m.provider == "cloud"
+        and (m.vendor is None or m.vendor == "openai")
+        and not m.api_key
         for m in active
     )
-    needs_gemini = any(m.provider == "cloud" and m.vendor == "gemini" for m in active)
+    needs_gemini = any(
+        m.provider == "cloud" and m.vendor == "gemini" and not m.api_key
+        for m in active
+    )
     needs_local_stt = settings.stt.provider == "local"
     needs_local_llm = settings.llm.provider == "local"
     needs_local_tts = settings.tts.provider == "local"
 
     if needs_openai and not settings.openai_api_key:
         raise ConfigError(
-            "Active selection includes an OpenAI cloud model but "
-            "OPENAI_API_KEY is not set (check .env)."
+            "Active selection includes an OpenAI cloud model without a "
+            "per-model api_key, and OPENAI_API_KEY is not set (check .env)."
         )
     if needs_gemini and not settings.gemini_api_key:
         raise ConfigError(
-            "Active selection includes a Gemini cloud model but "
-            "GEMINI_API_KEY is not set (check .env)."
+            "Active selection includes a Gemini cloud model without a "
+            "per-model api_key, and GEMINI_API_KEY is not set (check .env)."
         )
     if needs_local_stt and not settings.stt_url:
         raise ConfigError(

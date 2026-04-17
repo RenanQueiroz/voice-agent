@@ -5,6 +5,19 @@
 #
 # The "(local)" / "(cloud)" suffix is added to the display name automatically
 # from `provider` — don't include it in `name`.
+#
+# Per-model `api_key` override (cloud entries only): set this when one vendor
+# key is rate-limited or scoped to a subset of models — e.g. a legacy Gemini
+# key that still works on the LLM endpoint alongside a newer key for TTS.
+# Use `${VAR_NAME}` to reference an env var so real secrets stay out of this
+# committed file:
+#
+#   [[llm]]
+#   name     = "gemini-legacy-key"
+#   provider = "cloud"
+#   vendor   = "gemini"
+#   model    = "gemini-3.1-flash-lite-preview"
+#   api_key  = "${GEMINI_API_KEY_LEGACY}"
 
 # ── STT catalog ───────────────────────────────────────────
 [[stt]]
@@ -64,6 +77,9 @@ name     = "gemini-3.1-flash-lite-preview"
 provider = "cloud"
 vendor   = "gemini"
 model    = "gemini-3.1-flash-lite-preview"
+# Gemini OpenAI-compatible endpoint doesn't support the newer keys yet (starting with AQ.), so we need a separate legacy key here.
+# Details: https://discuss.ai.google.dev/t/new-aq-prefix-api-keys-fail-on-openai-compatible-endpoints-with-multiple-authentication-credentials-received/140545
+api_key  = "${GEMINI_API_KEY_LEGACY}"
 
 # ── TTS catalog ───────────────────────────────────────────
 [[tts]]
