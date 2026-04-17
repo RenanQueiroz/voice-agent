@@ -248,7 +248,12 @@ class VoiceAgentApp(App[None]):
 
         If no `tool_call` event was seen (direct invocation in tests, or a
         non-streamed code path), mount a standalone card as a fallback.
+        With `[shell].auto_approve`, we return True immediately without
+        any UI.
         """
+        if self.settings.shell.auto_approve:
+            return True
+
         # Give the tool_call event handler a moment to set up the card.
         for _ in range(50):  # up to ~500ms
             if self._pending_approval is not None:
@@ -438,6 +443,9 @@ class VoiceAgentApp(App[None]):
         # `request_shell_approval` — this guarantees the UI order is
         # ToolCard → ApprovalCard regardless of how the SDK interleaves
         # tool invocation with the event stream.
+        #
+        # If the user opted into `[shell].auto_approve`, skip the card and
+        # pre-resolve the future so the tool runs immediately.
         if name == "run_shell_command":
             import json as _json
 
@@ -448,11 +456,16 @@ class VoiceAgentApp(App[None]):
                     command = str(parsed["command"])
             except Exception:
                 pass
-            approval = ApprovalCard("Shell command", command)
-            self._mount_card(approval)
             loop = asyncio.get_event_loop()
-            self._pending_approval = loop.create_future()
-            self._pending_approval_card = approval
+            fut: asyncio.Future[bool] = loop.create_future()
+            self._pending_approval = fut
+            if self.settings.shell.auto_approve:
+                fut.set_result(True)
+                self._pending_approval_card = None
+            else:
+                approval = ApprovalCard("Shell command", command)
+                self._mount_card(approval)
+                self._pending_approval_card = approval
 
     def tool_result(self, output: str) -> None:
         if self._current_tool_card is not None:

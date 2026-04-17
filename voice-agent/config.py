@@ -107,9 +107,12 @@ class ModelConfig:
 
 @dataclass
 class ShellConfig:
-    """Optional shell-command tool. Every invocation requires user approval."""
+    """Optional shell-command tool. Every invocation requires user approval
+    unless `auto_approve` is set — in that case commands run silently the
+    moment the agent calls them. Use with care."""
 
     enabled: bool = False
+    auto_approve: bool = False
     timeout_seconds: int = 30
     max_output_bytes: int = 10_000
     cwd: str | None = None  # relative to project root; None = project root
@@ -390,6 +393,15 @@ def load_settings() -> Settings:
             enabled=bool(
                 str(
                     _get_optional("SHELL_ENABLED", shell_cfg.get("enabled")) or "false"
+                ).lower()
+                == "true"
+            ),
+            auto_approve=bool(
+                str(
+                    _get_optional(
+                        "SHELL_AUTO_APPROVE", shell_cfg.get("auto_approve")
+                    )
+                    or "false"
                 ).lower()
                 == "true"
             ),
