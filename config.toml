@@ -1,54 +1,103 @@
 [general]
-voice_mode = "local"
-input_mode = "vad"
-# Enable MCP tool servers (defined in mcp_servers.toml). Some models may not support tool use.
-enable_mcp = true
+input_mode = "vad"                 # "push_to_talk" or "vad"
+enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 
-[cloud]
-stt_model = "gpt-4o-transcribe"
-tts_model = "gpt-4o-mini-tts"
-llm_model = "gpt-5.4-mini"
-tts_voice = "alloy"
-
+# ── Local server endpoints ────────────────────────────────
+# Only consulted for roles whose active model is local. You can leave these
+# even if you're using cloud models — they're lazy-validated.
 [local]
-stt_model = "large-v3-turbo-q5_0"      # whisper.cpp model name (see setup-whispercpp.sh for supported list)
-stt_url = "http://localhost:9000"  # whisper-server endpoint
-tts_model = "mlx-community/Kokoro-82M-bf16"
-#tts_model = "mlx-community/chatterbox-turbo-4bit"
-tts_voice = "af_heart"
-llm_server = "llamacpp"          # "mlx-vlm", "mlx-lm", or "llamacpp"
-llm_url = "http://localhost:8080"
-audio_url = "http://localhost:8000"
+stt_url = "http://localhost:9000"  # whisper-server
+tts_url = "http://localhost:8000"  # mlx-audio
+llm_url = "http://localhost:8080"  # mlx-vlm / mlx-lm / llama-server
 
-[local.mlx-vlm]
-llm_model = "mlx-community/gemma-4-e4b-it-4bit"
-audio_input = true               # model accepts audio input directly (skip STT latency)
-kv_bits = 3.5
+# ── STT catalog ───────────────────────────────────────────
+# Each [[stt]] entry is a picker option. The first entry is the default when
+# preferences.toml doesn't exist. The "(local)" / "(cloud)" suffix is added
+# to the display name automatically from `provider` — don't include it in `name`.
+[[stt]]
+name     = "whisper-turbo"
+provider = "local"
+model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
+
+[[stt]]
+name     = "gpt-4o-transcribe"
+provider = "cloud"
+model    = "gpt-4o-transcribe"
+
+# ── LLM catalog ───────────────────────────────────────────
+# Local entries must set `server` (mlx-vlm / mlx-lm / llamacpp). `audio_input`
+# lets the LLM accept audio directly, skipping STT latency; only meaningful
+# when BOTH the STT and LLM are local (they share the same whisper audio
+# buffer — see providers.py).
+[[llm]]
+name        = "gemma-4-e4b-it (llamacpp)"
+provider    = "local"
+server      = "llamacpp"
+model       = "gemma-4-e4b-it"     # must match a section name in the preset
+preset      = "models.ini"
+audio_input = true
+
+[[llm]]
+name            = "gemma-4-e4b-it (mlx-vlm)"
+provider        = "local"
+server          = "mlx-vlm"
+model           = "mlx-community/gemma-4-e4b-it-4bit"
+audio_input     = true
+kv_bits         = 3.5
 kv_quant_scheme = "turboquant"
 
-[local.mlx-lm]
-llm_model = "mlx-community/gemma-3-4b-it-4bit"
+[[llm]]
+name     = "gemma-3-4b-it (mlx-lm)"
+provider = "local"
+server   = "mlx-lm"
+model    = "mlx-community/gemma-3-4b-it-4bit"
 
-[local.llamacpp]
-llm_model = "gemma-4-e4b-it"    # model name for API requests (must match models.ini)
-audio_input = true               # model accepts audio input directly (skip STT latency)
-#lllm_model = "gpt-oss-20b-low"
-preset = "models.ini"            # path to llama-server --models-preset INI file
+[[llm]]
+name     = "gpt-5.4-mini"
+provider = "cloud"
+model    = "gpt-5.4-mini"
+# OpenAI-hosted tools. Allowed: "web_search", "code_interpreter", "file_search".
+# These only work with cloud LLMs (provider = "cloud"). Leave empty to disable.
+# hosted_tools = ["web_search", "code_interpreter"]
+# For hosted_tools = ["file_search", ...], add:
+#   file_search_vector_stores = ["vs_abc123"]
+#   file_search_max_results   = 5
 
+# ── TTS catalog ───────────────────────────────────────────
+[[tts]]
+name     = "kokoro"
+provider = "local"
+model    = "mlx-community/Kokoro-82M-bf16"
+voice    = "af_heart"
+
+[[tts]]
+name     = "chatterbox-turbo"
+provider = "local"
+model    = "mlx-community/chatterbox-turbo-4bit"
+
+[[tts]]
+name     = "gpt-4o-mini-tts"
+provider = "cloud"
+model    = "gpt-4o-mini-tts"
+voice    = "alloy"
+
+# ── VAD ───────────────────────────────────────────────────
 [vad]
 # Speech probability threshold (0.0-1.0). Higher = fewer false triggers.
-# 0.5 is default. Raise to 0.6-0.7 in noisy environments.
-threshold = 0.5
+threshold  = 0.5
 # Milliseconds of silence after speech before triggering processing.
-# Lower = more responsive, but may cut off mid-pause.
 silence_ms = 500
 
+# ── Display ───────────────────────────────────────────────
 [display]
-# Show real-time transcription of user speech and agent response in the console.
 show_transcript = true
-# Show performance metrics (STT, LLM, TTS timing) after each response.
-show_metrics = true
+show_metrics    = true
 
+# ── Audio ─────────────────────────────────────────────────
+[audio]
+sample_rate = 24000
+
+# ── Agent ─────────────────────────────────────────────────
 [agent]
 instructions = """
 You are a friendly and helpful voice assistant. Today is {date}. Be warm and conversational.
@@ -57,9 +106,9 @@ no bullet points, no numbered lists, no asterisks, no bold/italic, no markdown, 
 Use plain sentences only. When listing things, say them in a natural sentence.
 If you don't know the answer, say you don't know.
 
-IMPORTANT: 
-Before calling a tool, ALWAYS say a short sentence about what you're about to do, and then do the tool call, BOTH PART OF THE SAME TURN. 
-Tool calls can take a while to run, so we need to give the user some feedback before they need to wait. 
+IMPORTANT:
+Before calling a tool, ALWAYS say a short sentence about what you're about to do, and then do the tool call, BOTH PART OF THE SAME TURN.
+Tool calls can take a while to run, so we need to give the user some feedback before they need to wait.
 For example, say "Let me check that for you" before a search tool call, or "I'll pull up the calendar" before a calendar tool call.
 Do this as many times as needed for as many tool calls as needed until you are able to complete the user's request. Only then you can end the turn.
 DO NOT END THE TURN UNTIL YOU HAVE COMPLETED THE USER'S REQUEST, INCLUDING ALL NECESSARY TOOL CALLS.
@@ -85,6 +134,3 @@ Tag	Description
 [chuckle]	Light chuckling
 [laugh]	Laughter
 """
-
-[audio]
-sample_rate = 24000

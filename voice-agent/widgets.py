@@ -11,12 +11,12 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Label, Static
+from textual.widgets import Button, Label, Select, Static
 
 from .display import TurnMetrics
 
 if TYPE_CHECKING:
-    pass
+    from .config import Settings
 
 
 # ── Turn cards ───────────────────────────────────────────
@@ -33,12 +33,16 @@ class UserTurn(Widget):
 
     text: reactive[str] = reactive("", layout=True)
     stt_seconds: reactive[float] = reactive(0.0, layout=True)
+    stt_name: reactive[str] = reactive("")
 
-    def __init__(self, text: str = "", stt_seconds: float = 0.0) -> None:
+    def __init__(
+        self, text: str = "", stt_seconds: float = 0.0, stt_name: str | None = None
+    ) -> None:
         super().__init__()
         self._body_ready = False
         self.set_reactive(UserTurn.text, text)
         self.set_reactive(UserTurn.stt_seconds, stt_seconds)
+        self.set_reactive(UserTurn.stt_name, stt_name or "")
 
     def compose(self) -> ComposeResult:
         yield Static("You", classes="label")
@@ -48,7 +52,7 @@ class UserTurn(Widget):
     def on_mount(self) -> None:
         self._body_ready = True
         self.watch_text(self.text)
-        self.watch_stt_seconds(self.stt_seconds)
+        self._refresh_stt()
 
     def watch_text(self, text: str) -> None:
         if not self._body_ready:
@@ -59,15 +63,22 @@ class UserTurn(Widget):
             return
         body.update(Text(text) if text else Text("…", style="dim"))
 
-    def watch_stt_seconds(self, seconds: float) -> None:
+    def watch_stt_seconds(self, _seconds: float) -> None:
+        self._refresh_stt()
+
+    def watch_stt_name(self, _name: str) -> None:
+        self._refresh_stt()
+
+    def _refresh_stt(self) -> None:
         if not self._body_ready:
             return
         try:
             stt = self.query_one(".stt", Static)
         except Exception:
             return
-        if seconds > 0:
-            stt.update(f"STT {seconds:.1f}s")
+        if self.stt_seconds > 0:
+            label = f"STT [{self.stt_name}]" if self.stt_name else "STT"
+            stt.update(f"{label} {self.stt_seconds:.1f}s")
             stt.display = True
         else:
             stt.update("")
@@ -130,12 +141,20 @@ class AgentTurn(Widget):
     def append(self, chunk: str) -> None:
         self.text = self.text + chunk
 
-    def set_metrics(self, m: TurnMetrics) -> None:
+    def set_metrics(
+        self,
+        m: TurnMetrics,
+        llm_name: str | None = None,
+        tts_name: str | None = None,
+    ) -> None:
+        def _label(role: str, name: str | None) -> str:
+            return f"{role} [{name}]" if name else role
+
         parts: list[str] = []
         if m.llm_seconds > 0:
-            parts.append(f"LLM {m.llm_seconds:.1f}s")
+            parts.append(f"{_label('LLM', llm_name)} {m.llm_seconds:.1f}s")
         if m.tts_seconds > 0:
-            parts.append(f"TTS {m.tts_seconds:.1f}s")
+            parts.append(f"{_label('TTS', tts_name)} {m.tts_seconds:.1f}s")
         if m.total_seconds > 0:
             parts.append(f"Total {m.total_seconds:.1f}s")
         self.metrics_line = " · ".join(parts)
@@ -284,13 +303,14 @@ class ToolsRow(Widget):
 
 
 class ControlRow(Horizontal):
-    """Third row of the footer: clickable Mute / Interrupt / Quit buttons."""
+    """Footer control row: clickable Mute / Interrupt / Switch / Quit buttons."""
 
     def compose(self) -> ComposeResult:
         yield Button("Mute  (M)", id="btn-mute", variant="default")
         yield Button(
             "Interrupt  (Space)", id="btn-interrupt", variant="warning", disabled=True
         )
+        yield Button("Switch models  (S)", id="btn-switch", variant="default")
         yield Button("Quit  (Q)", id="btn-quit", variant="error")
 
 
@@ -427,3 +447,62 @@ class SplashScreen(ModalScreen[None]):
             self._pending_rows.append((name, "failed", 0))
             return
         self._apply_row(name, "failed", 0)
+
+
+# ── Model switch modal ───────────────────────────────────
+
+
+class ModelSwitchScreen(ModalScreen[tuple[str, str, str] | None]):
+    """Modal with three Select dropdowns (STT / LLM / TTS) + Apply/Cancel."""
+
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self._settings = settings
+
+    def compose(self) -> ComposeResult:
+        s = self._settings
+        with Container(id="switch-panel"):
+            yield Label("Switch models", id="switch-title")
+            with Vertical(id="switch-rows"):
+                yield Label("STT", classes="switch-label")
+                yield Select(
+                    options=[(m.display_name, m.name) for m in s.stt_models],
+                    value=s.active_stt,
+                    id="switch-stt",
+                    allow_blank=False,
+                )
+                yield Label("LLM", classes="switch-label")
+                yield Select(
+                    options=[(m.display_name, m.name) for m in s.llm_models],
+                    value=s.active_llm,
+                    id="switch-llm",
+                    allow_blank=False,
+                )
+                yield Label("TTS", classes="switch-label")
+                yield Select(
+                    options=[(m.display_name, m.name) for m in s.tts_models],
+                    value=s.active_tts,
+                    id="switch-tts",
+                    allow_blank=False,
+                )
+            with Horizontal(id="switch-buttons"):
+                yield Button("Apply", id="switch-apply", variant="primary")
+                yield Button("Cancel", id="switch-cancel")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "switch-cancel":
+            self.dismiss(None)
+            return
+        if event.button.id == "switch-apply":
+            stt = self.query_one("#switch-stt", Select).value
+            llm = self.query_one("#switch-llm", Select).value
+            tts = self.query_one("#switch-tts", Select).value
+            if isinstance(stt, str) and isinstance(llm, str) and isinstance(tts, str):
+                self.dismiss((stt, llm, tts))

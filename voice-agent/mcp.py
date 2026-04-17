@@ -39,6 +39,11 @@ def load_mcp_servers() -> list[MCPServer]:
 
     for name, entry in config.items():
         entry = _expand_env(entry)
+        # Per-server toggle. Defaults to True so omitting the key keeps the
+        # existing behavior. Set `enabled = false` to skip this server
+        # without deleting it from the file.
+        if not entry.get("enabled", True):
+            continue
         server_type = entry.get("type", "stdio")
         cache_tools = entry.get("cache_tools", True)
 

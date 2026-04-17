@@ -1,160 +1,229 @@
 # Agent Guidelines
 
-This document provides guidance for AI agents working on this project.
+This document is for AI agents working on this project. It describes the architecture *as it is now* — if you find a discrepancy with the code, trust the code and update this file.
 
-## Project Overview
+## Project overview
 
-This is a real-time speech-to-speech voice agent using the OpenAI Agents SDK's `VoicePipeline`. It supports both cloud (OpenAI API) and local (MLX on Apple Silicon) inference with a 3-model pipeline: STT (speech-to-text), LLM (language model), TTS (text-to-speech). It also supports MCP servers for giving the agent tools.
+Real-time speech-to-speech voice agent built on the OpenAI Agents SDK's `VoicePipeline`. The UI is a fullscreen Textual app. Each role (STT / LLM / TTS) is configured independently as either cloud (OpenAI) or local (whisper.cpp / mlx-audio / mlx-vlm / mlx-lm / llama-server); the user can mix-and-match and swap at runtime.
 
-## Package Structure
+## Package structure
 
-The main package is `voice-agent/` (note: hyphen, not underscore). Run with `uv run python -m voice-agent`.
+The package name has a hyphen: `voice-agent/`, not `voice_agent/`. Run with `uv run python -m voice-agent`.
 
 ```
 voice-agent/
   __init__.py
-  __main__.py       # Entry point, creates Display, handles KeyboardInterrupt
-  config.py         # Settings dataclass, loads config.toml + .env, validates
-  audio.py          # VADRecorder (continuous speech detection), AudioPlayer (interruptible),
-                    #   read_key(), terminal cbreak management
-  display.py        # Rich TUI: persistent footer via Live, TurnMetrics dataclass
-  pipeline.py       # Main async loop: _run_vad() and _run_push_to_talk(),
-                    #   _process_turn(), interruption handling, MCP lifecycle
-  providers.py      # TranscriptVoiceWorkflow (intercepts STT/LLM/tool events for display),
-                    #   WhisperCppSTTModel, StreamingTTSModel, create_agent(), create_pipeline()
-  servers.py        # ServerManager: starts/stops whisper-server (STT),
-                    #   mlx-audio (TTS), and LLM servers (mlx-vlm, mlx-lm,
-                    #   llamacpp), health checks, dep install
-  mcp.py            # Loads MCP server configs from mcp_servers.toml,
-                    #   supports ${VAR} env substitution
+  __main__.py       # Entry point; just `VoiceAgentApp(load_settings()).run()`
+  app.py            # Textual App: compose, bindings, pipeline worker,
+                    #   action_open_settings, switch_models, display-contract
+                    #   methods (user_said, agent_*, metrics, server_*, …)
+  app.tcss          # Textual CSS
+  widgets.py        # UserTurn, AgentTurn, ToolCard, NoticeCard, ErrorCard,
+                    #   StateRow, ModelRow, ToolsRow, ControlRow, StatusFooter,
+                    #   ServerRow, SplashScreen, ModelSwitchScreen
+  display.py        # TurnMetrics dataclass + TYPE_CHECKING-only `Display` alias
+                    #   to VoiceAgentApp (kept so other modules can annotate
+                    #   without an import cycle)
+  audio.py          # VADRecorder (Silero ONNX), AudioPlayer, record_push_to_talk
+  pipeline.py       # Async loops (_run_vad, _run_push_to_talk), _process_turn,
+                    #   run_pipeline_loops entrypoint
+  providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
+                    #   StreamingTTSModel, AudioPassthroughSTTModel,
+                    #   create_agent / create_pipeline, _hosted_tools
+  servers.py        # ServerManager.reconcile() — per-role starter/stopper
+  mcp.py            # load_mcp_servers() with ${ENV} expansion + `enabled` toggle
+  preferences.py    # load_preferences / save_preferences (preferences.toml)
+  config.py         # Settings + ModelConfig + _parse_catalog +
+                    #   _validate_active_requirements + load_settings
 ```
 
-## Configuration Files
+## Configuration files
 
-- `config.toml` -- committed, all settings. No hardcoded defaults in code. LLM model config lives in server-type subsections (`[local.mlx-vlm]`, `[local.mlx-lm]`, `[local.llamacpp]`).
-- `.env` -- gitignored, secrets only (API keys).
-- `mcp_servers.toml` -- gitignored, MCP server definitions. Copy from `mcp_servers.toml.example`.
-- `models.ini` -- gitignored, llama-server model preset file. Copy from `models.ini.example`. Only used when `llm_server = "llamacpp"`.
-- `setup-whispercpp.sh` -- committed, builds whisper.cpp and downloads whisper models into `whispercpp/`.
-- `model_deps.toml` -- committed, maps model name patterns to pip/brew dependencies.
-- Environment variables override `.env` which override `config.toml`.
-- `config.py` validates all required fields at startup and fails fast with `ConfigError`.
-- Cloud-specific fields are optional when `voice_mode = "local"` and vice versa.
-- `tts_voice` is optional for both modes (some TTS models don't need it).
+- `config.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Shared fields in `[general]`, `[local]`, `[vad]`, `[display]`, `[audio]`, `[agent]`.
+- `preferences.toml` — gitignored. Three-line file `[active]` with the active `name` per role. Written by the Switch modal. Copy from `preferences.toml.example`.
+- `.env` — gitignored. `OPENAI_API_KEY` + any env overrides.
+- `mcp_servers.toml` — gitignored. MCP server definitions. Copy from `mcp_servers.toml.example`. Per-server `enabled = false` skips a server without deleting it.
+- `models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `server = "llamacpp"`. Copy from `models.ini.example`.
+- `model_deps.toml` — committed. Maps name patterns to pip/brew deps.
+- `setup-whispercpp.sh` / `setup-llamacpp.sh` — committed.
 
-## Key Architecture Patterns
+Priority: environment variable > `.env` > `config.toml`.
 
-### Async concurrency model (VAD mode)
+## Key architecture
 
-Three concurrent tasks run in `_run_vad()`:
-1. **VAD task** (`recorder.run()`) -- continuous background speech detection, pushes segments to `asyncio.Queue`
-2. **Key listener** (`check_keys()`) -- reads keys via `run_in_executor` (non-blocking)
-3. **Turn processing** (`_process_turn()`) -- cancellable task for STT->LLM->TTS->playback
+### Textual App, not Rich Live
 
-The main loop consumes from the VAD queue. When a turn is running and the user presses Space, the current task is cancelled, partial history is saved, and the agent resumes listening.
+`VoiceAgentApp(App)` in [voice-agent/app.py](voice-agent/app.py) is the single UI entrypoint. It:
 
-### Terminal input
+- composes a `VerticalScroll(#conversation)` above a docked `StatusFooter`
+- pushes a `SplashScreen` modal during initial server setup and pops it when ready
+- runs the entire pipeline (MCP connect + server reconcile + VAD/push-to-talk loop) in a single Textual worker launched from `on_mount`
+- exposes the former `Display` surface (`user_said`, `agent_start/chunk/end`, `tool_call/result`, `metrics`, `vad_*`, `processing`, `interrupted`, `server_*`, `api_error/*`, …) as methods. `providers.py`, `audio.py`, `servers.py`, and `pipeline.py` all call into these.
 
-`read_key(timeout=0.2)` uses `select()` with a timeout -- never blocks the event loop. Terminal is put in cbreak mode once (thread-safe via `_term_lock`) and restored on exit via `_restore_terminal()`.
+The `Display` name in type annotations is a `TYPE_CHECKING` alias for `VoiceAgentApp` in [voice-agent/display.py](voice-agent/display.py) — keeps import cycles at bay without introducing a real subclass.
 
-### Display (Rich Live)
+### Key and click handling
 
-The `Display` class uses `rich.live.Live` to render a persistent footer at the bottom. All conversation output uses `live.console.print()` to scroll above the footer. The footer updates on state changes via `_set_state()` -> `_update_footer()`.
+Key bindings on `VoiceAgentApp.BINDINGS` route to `action_*` methods. Buttons in `ControlRow` dispatch the same actions via `on_button_pressed`. Never use raw `sys.stdout` writes; Textual owns the screen.
 
-Direct `sys.stdout.write()` should be avoided -- it conflicts with Rich Live. Use `self._print()` for scrolling content.
+| Key       | Action                 | Notes                                 |
+|-----------|------------------------|---------------------------------------|
+| Space     | `action_interrupt`     | no-op unless `self.responding`        |
+| M         | `action_toggle_mute`   | flips `self.is_muted`                 |
+| S         | `action_open_settings` | blocked while responding              |
+| Q, Ctrl+C | `action_quit`          | sets `self.quit_event` + hard timeout |
+| K         | `action_record_key`    | pushes to `self.record_key_queue`     |
 
-Agent response text is buffered in `_agent_buffer` and printed in one shot via `_print()` in `agent_end()`. Use `rich.markup.escape()` on agent text to prevent Rich from interpreting brackets (e.g., `[laugh]`) as markup tags.
+### Per-role provider model
 
-### Model providers
+Config has a *catalog* per role, not a single `voice_mode`:
 
-Local STT uses whisper.cpp via `WhisperCppSTTModel` in `providers.py`, which sends audio to the whisper-server's `/inference` endpoint. Local TTS uses mlx-audio via `StreamingTTSModel` (adds `stream=True` to the TTS request for server-side streaming). All local LLM backends (mlx-vlm, mlx-lm, llamacpp) expose OpenAI-compatible APIs. We reuse the SDK's existing `OpenAITTSModel` and `OpenAIChatCompletionsModel` by pointing `AsyncOpenAI` clients at localhost.
+```toml
+[[stt]]  name = "whisper-turbo"  provider = "local"  model = "..."
+[[stt]]  name = "gpt-4o-transcribe" provider = "cloud" model = "..."
+```
+
+`ModelConfig` ([voice-agent/config.py](voice-agent/config.py)) has the fields for all roles; `_parse_catalog` validates role-specific ones (e.g., `server` / `preset` on local LLMs, `voice` on TTS, `hosted_tools` on cloud LLMs). `Settings.stt / llm / tts` are properties that look up the active entry by name.
+
+`ModelConfig.display_name == f"{name} ({provider})"` is the label used in the Switch modal and per-turn metrics. `name` is the stable key used in `preferences.toml`.
+
+### Runtime switching
+
+`VoiceAgentApp.action_open_settings` pushes a `ModelSwitchScreen(ModalScreen)` with three `Select` dropdowns. On Apply, `switch_models(stt, llm, tts)`:
+
+1. Holds `self._switch_lock` so no turn runs mid-swap
+2. Mutates `self.settings.active_*`
+3. Calls `self.server_manager.reconcile()` — see below
+4. Calls `create_pipeline(...)` to rebuild `self.workflow` + `self.pipeline`
+5. `save_preferences(stt, llm, tts)` writes `preferences.toml`
+6. On any failure, reverts the three active fields and mounts an `ErrorCard`
+
+The turn loops in [voice-agent/pipeline.py](voice-agent/pipeline.py) acquire `app._switch_lock` around each turn and read `app.workflow` / `app.pipeline` **fresh** per turn, so a swap takes effect on the next turn with no loop restart.
+
+### ServerManager (reconciler)
+
+`ServerManager` in [voice-agent/servers.py](voice-agent/servers.py) is a per-role reconciler, not a "start all / stop all" batch.
+
+- `_procs: dict[Role, Popen]` — at most one process per role
+- `_started_for: dict[Role, str]` — which model name launched that process; a mismatch on reconcile means restart
+- `reconcile()`: stop what's no longer needed, start what is, wait for health, optionally call `server_all_ready`
+- `stop()`: terminate everything (called on app exit)
+
+One-off details:
+
+- **mlx-audio** (TTS port 8000) takes no model at startup — the model is in each request body, so swapping between local TTS entries does not restart it.
+- **whisper-server** (STT port 9000) takes `-m <model>` at startup — swapping local STT models restarts.
+- **LLM server** (port 8080) command depends on the active LLM's `server` field (`mlx-vlm` / `mlx-lm` / `llamacpp`); swapping between local LLMs restarts. Health endpoint differs per backend (`/v1/models` for mlx-*, `/health` for llamacpp).
+
+Deps (`_ensure_whisper`, `_ensure_llm`, `_ensure_tts`) run the first time each role is started, not up front. `_apply_patches` still handles the misaki/phonemizer Kokoro quirk when the active TTS matches `"kokoro"`.
+
+### Providers
+
+In [voice-agent/providers.py](voice-agent/providers.py):
+
+- `create_agent(settings, mcp_servers)` — branches on `settings.llm.provider`. For `"local"`, wraps `OpenAIChatCompletionsModel` around an `AsyncOpenAI` client pointed at `settings.llm_url`. For `"cloud"`, passes the model string directly so the SDK's default (OpenAI Responses) is used. Hosted tools (from `settings.llm.hosted_tools`) are attached via `_hosted_tools()`.
+- `create_pipeline_config` — local TTS ⇒ `OpenAIVoiceModelProvider(base_url=tts_url/v1)`, cloud ⇒ default.
+- `create_pipeline` — local TTS ⇒ `StreamingTTSModel` (adds `stream=True`), local STT ⇒ `WhisperCppSTTModel`. **Audio-passthrough** (`AudioPassthroughSTTModel`) wraps whisper **only** when STT and LLM are both local and the active LLM has `audio_input = true`.
 
 ### TranscriptVoiceWorkflow
 
-This is the core interception layer in `providers.py`. It overrides `SingleAgentVoiceWorkflow.run()` to:
-- Replicate the parent's logic (add to history, `Runner.run_streamed()`, update history)
-- Intercept `run_item_stream_event` events for `tool_called` and `tool_output` to display tool usage
-- Intercept `raw_response_event` with `response.output_text.delta` for streaming text
-- Measure STT, LLM, and token timing
-- Track `_partial_response` for interruption history preservation
+The core interception layer. It overrides `SingleAgentVoiceWorkflow.run()` — it does **not** call `super().run()`; it replicates the parent's logic so it can intercept:
 
-**Important**: It does NOT call `super().run()` -- it replicates the parent logic directly to intercept all event types. When modifying, ensure the history update (`_input_history = result.to_input_list()`) and agent update (`_current_agent = result.last_agent`) are preserved.
+- `run_item_stream_event` → `tool_called` / `tool_output` → `display.tool_call / tool_result`
+- `raw_response_event` with `response.output_text.delta` → `display.agent_chunk` + `_partial_response += chunk`
 
-### VAD algorithm
+Preserve `self._input_history = result.to_input_list()` and `self._current_agent = result.last_agent` at the end of `run()` — the parent relies on those between turns.
 
-- Audio captured at 24kHz, downsampled to 16kHz for webrtcvad
-- Pre-roll ring buffer (100ms) captures audio before speech onset
-- Requires 3 consecutive speech frames (60ms) to confirm speech start
-- Silence threshold (configurable, default 500ms) triggers segment completion
-- Energy threshold filters low-level noise even when webrtcvad says "speech"
-- Minimum segment duration (0.5s) discards short noise bursts
+`save_partial_history()` appends the partial assistant text with `[interrupted]` to history on Space-interrupt.
 
-### Echo suppression
+### Concurrency model
 
-No acoustic echo cancellation -- the mic is muted during agent response to prevent feedback from speakers. User can press Space to interrupt instead of speaking over the agent. The VAD is paused during response and resumed after.
+VAD mode runs three concurrent tasks in `_run_vad()`:
+
+1. `recorder.run(quit_event)` — continuous Silero VAD pushing segments to `recorder.segments`
+2. `mute_watcher()` — mirrors `app.is_muted` onto the recorder
+3. the main loop — consumes `recorder.segments`, spawns `_process_turn` as a cancellable task, races it against `app.interrupt_event`
+
+Push-to-talk mode is a single loop awaiting `app.record_key_queue` between start/stop presses.
+
+Key facts for the concurrency:
+
+- **No `read_key()` / cbreak anymore.** Textual owns the terminal. All keys come in via `BINDINGS` and set `app.is_muted`, `app.interrupt_event`, or push to `app.record_key_queue`.
+- **Pipeline state is on the app.** `app.workflow`, `app.pipeline`, `app.server_manager`, `app.mcp_servers`, `app._switch_lock` — loops read these fresh per turn.
+- `VADRecorder.run()` must yield (`await asyncio.sleep()`) or the event loop starves the UI.
+- Any blocking I/O has to go through `run_in_executor` (`AudioPlayer.play` already does).
+
+### Display contract
+
+The app implements ~30 methods that providers / audio / servers / pipeline call. Don't inline drawing anywhere else. The key families:
+
+- **Conversation**: `user_said`, `agent_start/chunk/end`, `tool_call`, `tool_result`, `interrupted`, `metrics`
+- **VAD / state**: `vad_speaking`, `vad_silence`, `vad_clear`, `listening`, `muted`, `unmuted`, `processing`, `recording_start`, `recording_too_short`, `ready_for_key`, `ready_banner`
+- **Server lifecycle (drives splash)**: `server_setup_start`, `server_starting`, `server_waiting`, `server_ready_one`, `server_all_ready`, `server_failed`, `server_timeout`, `server_install*`, `server_patched`, `setup_failed`
+- **Errors (mount as inline `ErrorCard`)**: `api_error`, `api_error_with_logs`, `connection_error`, `auth_error`, `rate_limit_error`, `tts_stream_error`
+- **Tools**: `set_mcp_tools(list[str])`
+
+When a new role needs to call the app, add a method here (not a widget subclass).
+
+### UserTurn placeholder & STT ordering
+
+Because `AudioPassthroughSTTModel` fires real STT in a background task, the agent often starts streaming **before** we have the transcription. To keep user/agent turn order visually correct:
+
+- `app.processing(duration)` mounts an empty `UserTurn` with a dim `…` placeholder and stashes it in `self._pending_user_turn`.
+- `app.user_said(text, stt_seconds)` fills the placeholder if one exists (mutates reactive attrs); otherwise it mounts a fresh one.
+
+STT timing + model name are shown on the `UserTurn` (`STT [whisper-turbo (local)] 0.4s`). The `AgentTurn` metrics line carries only LLM / TTS / Total.
+
+### Hosted OpenAI tools
+
+Per-LLM in `config.toml`:
+
+```toml
+[[llm]]
+provider = "cloud"
+hosted_tools = ["web_search", "code_interpreter"]
+# for file_search, also:
+# file_search_vector_stores = ["vs_abc123"]
+# file_search_max_results   = 5
+```
+
+`_hosted_tools(llm)` in `providers.py` constructs `WebSearchTool()`, `CodeInterpreterTool(tool_config={"type": "code_interpreter", "container": {"type": "auto"}})`, and `FileSearchTool(vector_store_ids=…, max_num_results=…)`. Config-time validation rejects hosted tools on non-cloud LLMs and rejects `file_search` without vector stores.
 
 ### MCP servers
 
-MCP servers are defined in `mcp_servers.toml` (gitignored) and loaded by `mcp.py`. The lifecycle is managed in `pipeline.run()`:
-1. `load_mcp_servers()` reads the TOML and creates server instances
-2. Each server is connected via `await server.connect()`
-3. Tool names are collected and shown in the footer
-4. The connected server instances are passed to `create_agent()` -> `Agent(mcp_servers=...)`
-5. On exit, `server.cleanup()` is called for each
-
-**Critical**: MCP servers must be loaded exactly once. The same connected instances must be passed to the Agent. Loading them twice creates disconnected duplicates that silently fail.
-
-Environment variable substitution (`${VAR_NAME}`) is supported in all string values in `mcp_servers.toml`, resolved from `.env` and the environment.
-
-### Server management (local mode)
-
-`ServerManager` handles three servers in local mode:
-- **whisper-server** (STT, port 9000): whisper.cpp's HTTP server with built-in VAD. Configured via `stt_url` and `stt_model` (whisper.cpp model name, e.g., `large-v3-turbo`). Built/downloaded by `setup-whispercpp.sh` into `whispercpp/`.
-- **mlx-audio** (TTS only, port 8000): Handles text-to-speech. Configured via `audio_url` and `tts_model`.
-- **LLM server** (port 8080): One of three backends:
-  - **mlx-vlm**: Python module (`mlx_vlm.server`), supports `--kv-bits`/`--kv-quant-scheme`, health via `/v1/models`
-  - **mlx-lm**: Python module (`mlx_lm.server`), health via `/v1/models`
-  - **llamacpp**: Native binary (`./llamacpp/llama-server`), models configured via `--models-preset models.ini`, health via `/health`
-
-Lifecycle:
-1. Check/install system deps (brew packages from `model_deps.toml`)
-2. Check/install pip packages (`mlx-audio[server,tts]`, mlx LLM package if applicable)
-3. For llamacpp: run `setup-llamacpp.sh` to download/update the binary
-4. For whisper-server: run `setup-whispercpp.sh` to build whisper.cpp and download models
-5. Patch known compatibility issues (misaki/espeak.py for Kokoro TTS)
-6. Start server subprocesses with stdout redirected to `logs/`
-7. Poll health endpoint until healthy (10 min timeout for model downloads)
-8. On exit: SIGTERM -> wait 5s -> SIGKILL
-
-Config is organized into server-type subsections in `config.toml`. The `[local]` section has shared fields (`llm_server`, `llm_url`, `audio_url`, `stt_url`, `stt_model`), and each `[local.<server>]` subsection has its own `llm_model` and server-specific flags. Code loads from the active subsection based on `llm_server`.
+`load_mcp_servers()` in [voice-agent/mcp.py](voice-agent/mcp.py) reads `mcp_servers.toml`, expands `${VAR}` against env/`.env`, and returns connected `MCPServer` instances. Per-server `enabled = false` skips the entry. Called **exactly once** per app run from `VoiceAgentApp._run_pipeline`; same instances are passed to `create_agent(..., mcp_servers=…)`.
 
 ### Partial history on interruption
 
-`TranscriptVoiceWorkflow` tracks `_partial_response` during LLM streaming. On cancellation, `save_partial_history()` appends the partial text with `[interrupted]` marker to `_input_history` so the agent has context in the next turn.
+`TranscriptVoiceWorkflow._partial_response` accumulates as tokens stream. On Space, `pipeline._run_vad` cancels the turn task, calls `save_partial_history()`, and `app.interrupted()` mounts an "-interrupted" class on the current `AgentTurn`. Next turn sees the partial assistant reply in history with `[interrupted]`.
 
-## Development Commands
+## Development commands
 
 ```bash
-uv run pyright              # Type check
-uv run ruff format .        # Format
-uv run ruff check --fix .   # Lint
-uv run python -m voice-agent  # Run
-./setup.sh                  # Install deps
-./setup.sh --update         # Update deps
+uv run pyright voice-agent              # Type check (whispercpp/ is vendored; ignore)
+uv run ruff format voice-agent/         # Format
+uv run ruff check --fix voice-agent/    # Lint
+uv run python -m voice-agent            # Run
+./setup.sh                              # Install deps (core + local)
+./setup.sh --update                     # Update all deps
 ```
 
-## Common Pitfalls
+## Common pitfalls
 
-- **Package name has a hyphen**: `voice-agent/`, not `voice_agent/`. Python allows this but imports use it as-is.
-- **Rich Live + stdout**: Don't use `sys.stdout.write()` for content that should scroll above the footer. Use `display._print()`. Raw stdout writes will conflict with Live's cursor positioning.
-- **Rich markup in agent text**: Agent responses may contain `[brackets]` (e.g., `[laugh]`). Always use `rich.markup.escape()` before passing agent text to Rich, or it will silently strip the bracketed content.
-- **Config defaults**: There are no hardcoded defaults in `config.py`. All values must come from `config.toml` or environment variables. Adding a new config field requires adding it to both `config.toml` and `load_settings()`.
-- **Config subsections**: LLM model config lives in `[local.<server>]` subsections (e.g., `[local.mlx-vlm]`). The active subsection is determined by `local.llm_server`. When adding server-specific fields, put them in the right subsection, not in `[local]`.
-- **llamacpp preset file**: `models.ini` is gitignored (user-specific, like `.env`). The `models.ini.example` provides the template. The `llm_model` in `[local.llamacpp]` must match a model alias defined in the preset file.
-- **MCP server lifecycle**: Servers are loaded once in `pipeline.run()` and the same instances are passed to the Agent. Never call `load_mcp_servers()` in multiple places -- it creates separate disconnected instances.
-- **VAD runs in background**: `VADRecorder.run()` is a long-running async task. It must yield frequently (`await asyncio.sleep()`) or the event loop starves other tasks.
-- **Blocking calls**: Any blocking I/O (key reads, HTTP calls) must use `run_in_executor` or async equivalents. Blocking the event loop freezes the VAD.
-- **Terminal state**: Always call `_restore_terminal()` on exit. If the process crashes without restoring, the terminal will be in cbreak mode (no echo, no line buffering).
-- **misaki/espeak.py patching**: The `_apply_patches()` method in `servers.py` fixes a known incompatibility between misaki and phonemizer 3.3. It replaces both the library path and data path from `espeakng_loader` (broken CI build paths) with system espeak-ng paths. The patch deletes `.pyc` cache files to ensure the fix takes effect.
-- **stt_model meaning differs by mode**: In cloud mode, `stt_model` is an OpenAI model name (e.g., `gpt-4o-transcribe`). In local mode, `stt_model` is a whisper.cpp model name (e.g., `large-v3-turbo`) -- not an MLX model path. The whisper model is managed by `setup-whispercpp.sh`, not pip.
-- **tts_voice is optional**: Some TTS models don't require a voice parameter. The config property returns `None` if not set, and providers handle `None` gracefully.
+- **Package name has a hyphen.** `voice-agent/`, not `voice_agent/`. Imports use the hyphen verbatim (`from voice-agent.app import …`). In Python code the hyphen works because we import via `importlib.import_module` in tests, and relative imports inside the package are fine.
+- **`voice_mode` is gone.** Don't reintroduce it. Branch on `settings.<role>.provider` instead. Each role is independent.
+- **`ModelConfig.name` vs `display_name`.** Preferences / config use `name` (bare). Anything shown to the user should use `display_name` (adds `(local)` / `(cloud)`).
+- **Hosted tools are cloud-only.** `_parse_catalog` raises on a local LLM with `hosted_tools`; keep that check if you touch parsing.
+- **Audio-passthrough gating.** Only wrap STT with `AudioPassthroughSTTModel` when **both** STT and LLM are local (and the LLM's `audio_input = true`). Otherwise the audio never reaches a model that can consume it.
+- **Don't capture `workflow` / `pipeline` in the loop.** Read `app.workflow` / `app.pipeline` fresh each turn so runtime swaps apply. The `_switch_lock` prevents the swap from racing a turn.
+- **Textual owns the terminal.** No `sys.stdout.write`, no `tty.setcbreak`, no `termios` calls. Use `app._mount_card`, `app._set_state`, etc.
+- **Rich markup in agent text.** The LLM may emit `[brackets]` (e.g. `[laugh]`) — Textual's `Text(text)` is fine (we construct it as plain text), but if you ever switch back to `Text.from_markup`, escape first with `rich.markup.escape`.
+- **`ServerManager.reconcile` is idempotent.** Call it freely (startup + every switch). The `_started_for` bookkeeping decides if a running process is still OK.
+- **mlx-audio is model-agnostic.** Don't restart it when swapping local TTS — it takes the model in the request body. Only whisper-server and the LLM server restart on a model change.
+- **MCP loading happens once.** In `VoiceAgentApp._run_pipeline`. Don't call `load_mcp_servers()` anywhere else; it creates *new* disconnected server instances and the Agent won't see the live ones.
+- **VAD must yield.** `VADRecorder.run()` has `await asyncio.sleep(0.005)` when no data is available — keep it, or you'll starve the Textual event loop.
+- **misaki/espeak patch.** `ServerManager._apply_patches` replaces library + data paths and deletes `.pyc` caches. Only runs for TTS roles whose active model name contains `"kokoro"`. Don't widen it blindly.
+- **Whisper model name.** In local STT, `ModelConfig.model` is a whisper.cpp model file suffix like `large-v3-turbo-q5_0` (matches `ggml-{name}.bin`), *not* an MLX path. `setup-whispercpp.sh` manages these files.
+- **`tts_voice` is optional.** Some local TTS models (chatterbox) don't take a voice. `ModelConfig.voice = None` is handled by `create_pipeline_config`.
+- **Preferences fallback.** Unknown name in `preferences.toml` warns and falls back to the first catalog entry — don't crash on it.
+- **Splash buffering.** `SplashScreen` methods (`log_line`, `set_waiting`, `set_ready`, `set_failed`) buffer until the screen is mounted, so they're safe to call from the moment the worker starts.

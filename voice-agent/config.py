@@ -1,6 +1,15 @@
-"""Configuration loaded from config.toml, with .env and environment variable overrides.
+"""Configuration loaded from config.toml + preferences.toml, with .env and
+environment variable overrides.
 
-Priority (highest wins): environment variables > .env > config.toml
+Instead of a single `voice_mode` toggle, the user defines a catalog of
+models per role (STT / LLM / TTS). Each catalog entry is a `ModelConfig`
+that marks itself `provider = "cloud" | "local"` and carries the fields
+relevant to that role/provider (e.g., `voice` for TTS, `server/preset/
+kv_bits` for local LLMs). A gitignored `preferences.toml` records which
+entry is active per role; on first run (or bad preference) we fall back
+to the first catalog entry.
+
+Priority (highest wins): environment variables > .env > config.toml.
 """
 
 from __future__ import annotations
@@ -8,11 +17,13 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
+
+from .preferences import load_preferences
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -20,7 +31,7 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 
 class ConfigError(SystemExit):
-    """Raised when a required config value is missing."""
+    """Raised when a required config value is missing or invalid."""
 
 
 def _load_toml() -> dict:
@@ -32,8 +43,7 @@ def _load_toml() -> dict:
         return tomllib.load(f)
 
 
-def _get(env_key: str, toml_value: str | int | bool | None) -> str:
-    """Resolve a config value: env var > toml. Raises if neither is set."""
+def _get(env_key: str, toml_value: Any) -> str:
     env = os.getenv(env_key)
     if env is not None:
         return env
@@ -44,8 +54,7 @@ def _get(env_key: str, toml_value: str | int | bool | None) -> str:
     )
 
 
-def _get_optional(env_key: str, toml_value: str | int | bool | None) -> str | None:
-    """Resolve a config value: env var > toml. Returns None if not set."""
+def _get_optional(env_key: str, toml_value: Any) -> str | None:
     env = os.getenv(env_key)
     if env is not None:
         return env
@@ -54,156 +63,297 @@ def _get_optional(env_key: str, toml_value: str | int | bool | None) -> str | No
     return None
 
 
+Role = Literal["stt", "llm", "tts"]
+Provider = Literal["cloud", "local"]
+LLMServer = Literal["mlx-vlm", "mlx-lm", "llamacpp"]
+
+
+HOSTED_TOOL_NAMES = {"web_search", "code_interpreter", "file_search"}
+
+
+@dataclass
+class ModelConfig:
+    """One entry in a role's model catalog."""
+
+    name: str  # unique, user-facing; appears in the Switch modal
+    role: Role
+    provider: Provider
+    model: str  # cloud model id or local model spec (mlx path / whisper.cpp name / preset alias)
+
+    # TTS-only
+    voice: str | None = None
+
+    # Local-LLM-only
+    server: LLMServer | None = None
+    preset: str | None = None  # llamacpp models.ini path, relative to project root
+    kv_bits: str | None = None
+    kv_quant_scheme: str | None = None
+    audio_input: bool = False  # LLM accepts audio directly
+
+    # Cloud-LLM-only: OpenAI-hosted tools (see providers._hosted_tools)
+    hosted_tools: list[str] = field(default_factory=list)
+    # For hosted_tools = ["file_search"]: required vector store IDs + optional
+    # max_num_results. Ignored if file_search isn't enabled.
+    file_search_vector_stores: list[str] = field(default_factory=list)
+    file_search_max_results: int | None = None
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable label: `"{name} ({provider})"`. Used in the Switch
+        modal and in per-turn metrics. The raw `name` remains the stable key
+        for preferences.toml lookups."""
+        return f"{self.name} ({self.provider})"
+
+
 @dataclass
 class Settings:
-    voice_mode: Literal["cloud", "local"]
     input_mode: Literal["push_to_talk", "vad"]
-
-    # Cloud
     openai_api_key: str | None
 
-    # Local server config
-    mlx_audio_url: str | None
-    stt_url: str | None  # whisper-server endpoint
-    mlx_llm_url: str | None
-    mlx_llm_server: str | None  # "mlx-vlm", "mlx-lm", or "llamacpp"
-    mlx_kv_bits: str | None  # KV cache quantization bits (mlx-vlm only)
-    mlx_kv_quant_scheme: str | None  # KV cache quantization scheme (mlx-vlm only)
-    llamacpp_preset: str | None  # path to llama-server models preset INI file
-    llm_audio_input: bool  # LLM model accepts audio input directly
+    # Local server endpoints. Required only for roles whose active model is
+    # local. Validated lazily.
+    stt_url: str | None
+    tts_url: str | None
+    llm_url: str | None
 
-    # Cloud model names
-    cloud_stt_model: str | None
-    cloud_tts_model: str | None
-    cloud_llm_model: str | None
-    cloud_tts_voice: str | None
+    # Catalogs
+    stt_models: list[ModelConfig] = field(default_factory=list)
+    llm_models: list[ModelConfig] = field(default_factory=list)
+    tts_models: list[ModelConfig] = field(default_factory=list)
 
-    # Local model names
-    local_stt_model: str | None
-    local_tts_model: str | None
-    local_llm_model: str | None
-    local_tts_voice: str | None
-
-    # Agent
-    agent_instructions: str
-    tool_call_filler: str | None
+    # Active selection (mutates at runtime via the Switch modal)
+    active_stt: str = ""
+    active_llm: str = ""
+    active_tts: str = ""
 
     # VAD
-    vad_threshold: float
-    vad_silence_ms: int
+    vad_threshold: float = 0.5
+    vad_silence_ms: int = 500
 
     # Features
-    enable_mcp: bool
+    enable_mcp: bool = False
 
     # Display
-    show_transcript: bool
-    show_metrics: bool
+    show_transcript: bool = True
+    show_metrics: bool = True
 
     # Audio
-    sample_rate: int
+    sample_rate: int = 24000
+
+    # Agent
+    agent_instructions: str = ""
+    tool_call_filler: str | None = None
+    model_instruction_snippets: dict[str, str] = field(default_factory=dict)
+
+    # ── Active-model lookups ─────────────────────────────────
+
+    @property
+    def stt(self) -> ModelConfig:
+        return self._find("stt", self.active_stt, self.stt_models)
+
+    @property
+    def llm(self) -> ModelConfig:
+        return self._find("llm", self.active_llm, self.llm_models)
+
+    @property
+    def tts(self) -> ModelConfig:
+        return self._find("tts", self.active_tts, self.tts_models)
+
+    @staticmethod
+    def _find(role: str, name: str, catalog: list[ModelConfig]) -> ModelConfig:
+        for m in catalog:
+            if m.name == name:
+                return m
+        raise ConfigError(
+            f"Active {role.upper()} model '{name}' is not in the catalog."
+        )
+
+    # ── Active-model effective string values (for agent instructions etc.) ─
 
     @property
     def stt_model(self) -> str:
-        if self.voice_mode == "local":
-            if not self.local_stt_model:
-                raise ConfigError("Missing config: local.stt_model in config.toml")
-            return self.local_stt_model
-        if not self.cloud_stt_model:
-            raise ConfigError("Missing config: cloud.stt_model in config.toml")
-        return self.cloud_stt_model
-
-    @property
-    def tts_model(self) -> str:
-        if self.voice_mode == "local":
-            if not self.local_tts_model:
-                raise ConfigError("Missing config: local.tts_model in config.toml")
-            return self.local_tts_model
-        if not self.cloud_tts_model:
-            raise ConfigError("Missing config: cloud.tts_model in config.toml")
-        return self.cloud_tts_model
+        return self.stt.model
 
     @property
     def llm_model(self) -> str:
-        if self.voice_mode == "local":
-            if not self.local_llm_model:
-                section = self.mlx_llm_server or "local"
-                raise ConfigError(
-                    f"Missing config: llm_model in [local.{section}] in config.toml"
-                )
-            return self.local_llm_model
-        if not self.cloud_llm_model:
-            raise ConfigError("Missing config: cloud.llm_model in config.toml")
-        return self.cloud_llm_model
+        return self.llm.model
+
+    @property
+    def tts_model(self) -> str:
+        return self.tts.model
 
     @property
     def tts_voice(self) -> str | None:
-        if self.voice_mode == "local":
-            return self.local_tts_voice
-        return self.cloud_tts_voice
+        return self.tts.voice
+
+    def active_names(self) -> dict[str, str]:
+        return {"stt": self.active_stt, "llm": self.active_llm, "tts": self.active_tts}
+
+
+def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
+    if not entries:
+        raise ConfigError(
+            f"Missing config: at least one [[{role}]] entry required in config.toml"
+        )
+    models: list[ModelConfig] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(entries):
+        name = entry.get("name")
+        if not name or not isinstance(name, str):
+            raise ConfigError(
+                f"[[{role}]] entry #{i + 1} is missing a string 'name' field"
+            )
+        if name in seen:
+            raise ConfigError(f"Duplicate [[{role}]] name: '{name}'")
+        seen.add(name)
+
+        provider = entry.get("provider")
+        if provider not in ("cloud", "local"):
+            raise ConfigError(
+                f"[[{role}]] '{name}' must set provider = 'cloud' | 'local' (got {provider!r})"
+            )
+
+        model = entry.get("model")
+        if not model or not isinstance(model, str):
+            raise ConfigError(f"[[{role}]] '{name}' is missing a string 'model' field")
+
+        config = ModelConfig(name=name, role=role, provider=provider, model=model)
+
+        if role == "tts":
+            voice = entry.get("voice")
+            if voice is not None and not isinstance(voice, str):
+                raise ConfigError(
+                    f"[[tts]] '{name}' has a non-string 'voice': {voice!r}"
+                )
+            config.voice = voice
+
+        if role == "llm":
+            hosted_tools = entry.get("hosted_tools") or []
+            if hosted_tools:
+                if provider != "cloud":
+                    raise ConfigError(
+                        f"[[llm]] '{name}' has hosted_tools but provider is "
+                        f"'{provider}' — hosted tools only work with cloud OpenAI models."
+                    )
+                if not isinstance(hosted_tools, list) or not all(
+                    isinstance(t, str) for t in hosted_tools
+                ):
+                    raise ConfigError(
+                        f"[[llm]] '{name}' hosted_tools must be a list of strings"
+                    )
+                unknown = [t for t in hosted_tools if t not in HOSTED_TOOL_NAMES]
+                if unknown:
+                    raise ConfigError(
+                        f"[[llm]] '{name}' has unknown hosted_tools: {unknown}. "
+                        f"Allowed: {sorted(HOSTED_TOOL_NAMES)}"
+                    )
+                config.hosted_tools = list(hosted_tools)
+            vs = entry.get("file_search_vector_stores") or []
+            if vs:
+                if not isinstance(vs, list) or not all(isinstance(v, str) for v in vs):
+                    raise ConfigError(
+                        f"[[llm]] '{name}' file_search_vector_stores must be a list of strings"
+                    )
+                config.file_search_vector_stores = list(vs)
+            fsmax = entry.get("file_search_max_results")
+            if fsmax is not None:
+                config.file_search_max_results = int(fsmax)
+            if "file_search" in config.hosted_tools and not config.file_search_vector_stores:
+                raise ConfigError(
+                    f"[[llm]] '{name}' has hosted_tools = ['file_search', ...] "
+                    f"but no file_search_vector_stores set."
+                )
+
+        if role == "llm" and provider == "local":
+            server = entry.get("server")
+            if server not in ("mlx-vlm", "mlx-lm", "llamacpp"):
+                raise ConfigError(
+                    f"[[llm]] '{name}' must set server = 'mlx-vlm' | 'mlx-lm' | 'llamacpp' "
+                    f"(got {server!r})"
+                )
+            config.server = server
+            config.audio_input = bool(entry.get("audio_input", False))
+            kv_bits = entry.get("kv_bits")
+            config.kv_bits = str(kv_bits) if kv_bits is not None else None
+            kv_scheme = entry.get("kv_quant_scheme")
+            config.kv_quant_scheme = str(kv_scheme) if kv_scheme is not None else None
+            preset = entry.get("preset")
+            if server == "llamacpp":
+                if not preset or not isinstance(preset, str):
+                    raise ConfigError(
+                        f"[[llm]] '{name}' (server=llamacpp) needs a 'preset' "
+                        f"path, e.g. preset = 'models.ini'"
+                    )
+                preset_path = _PROJECT_ROOT / preset
+                if not preset_path.exists():
+                    raise ConfigError(
+                        f"[[llm]] '{name}' preset file not found: {preset_path}. "
+                        "Copy models.ini.example to models.ini and customize it."
+                    )
+                config.preset = preset
+
+        models.append(config)
+    return models
+
+
+def _resolve_active(role: Role, pref: str | None, catalog: list[ModelConfig]) -> str:
+    if pref:
+        for m in catalog:
+            if m.name == pref:
+                return pref
+        print(
+            f"Warning: preferences.toml active {role} '{pref}' not found in "
+            f"catalog; falling back to '{catalog[0].name}'.",
+            file=sys.stderr,
+        )
+    return catalog[0].name
 
 
 def load_settings() -> Settings:
     t = _load_toml()
+
+    # Detect the old schema and error with a migration hint.
+    if "cloud" in t or ("local" in t and "stt_model" in t.get("local", {})):
+        raise ConfigError(
+            "config.toml uses the old voice_mode/cloud/local schema.\n"
+            "The app now uses per-role catalogs — see the top of the updated "
+            "config.toml in this repo for the new format."
+        )
+
     general = t.get("general", {})
-    cloud = t.get("cloud", {})
     local = t.get("local", {})
     vad = t.get("vad", {})
     agent = t.get("agent", {})
     audio = t.get("audio", {})
     display = t.get("display", {})
 
-    voice_mode = _get("VOICE_MODE", general.get("voice_mode"))
     input_mode = _get("INPUT_MODE", general.get("input_mode"))
-
-    # Validate mode values
-    if voice_mode not in ("cloud", "local"):
-        raise ConfigError(
-            f"Invalid voice_mode: '{voice_mode}' (must be 'cloud' or 'local')"
-        )
     if input_mode not in ("push_to_talk", "vad"):
         raise ConfigError(
             f"Invalid input_mode: '{input_mode}' (must be 'push_to_talk' or 'vad')"
         )
 
-    # Resolve LLM server type first, then load from its subsection
-    llm_server = _get_optional("MLX_LLM_SERVER", local.get("llm_server"))
-    llm_section = local.get(llm_server, {}) if llm_server else {}
+    stt_models = _parse_catalog("stt", list(t.get("stt", [])))
+    llm_models = _parse_catalog("llm", list(t.get("llm", [])))
+    tts_models = _parse_catalog("tts", list(t.get("tts", [])))
+
+    prefs = load_preferences()
+    active_stt = _resolve_active("stt", prefs.get("stt"), stt_models)
+    active_llm = _resolve_active("llm", prefs.get("llm"), llm_models)
+    active_tts = _resolve_active("tts", prefs.get("tts"), tts_models)
 
     settings = Settings(
-        voice_mode=voice_mode,  # type: ignore[arg-type]
         input_mode=input_mode,  # type: ignore[arg-type]
         openai_api_key=os.getenv("OPENAI_API_KEY"),
-        # Local settings (optional when running cloud)
-        mlx_audio_url=_get_optional("MLX_AUDIO_URL", local.get("audio_url")),
         stt_url=_get_optional("STT_URL", local.get("stt_url")),
-        mlx_llm_url=_get_optional(
-            "MLX_LLM_URL", local.get("llm_url") or local.get("vlm_url")
-        ),
-        mlx_llm_server=llm_server,
-        mlx_kv_bits=_get_optional("MLX_KV_BITS", llm_section.get("kv_bits")),
-        mlx_kv_quant_scheme=_get_optional(
-            "MLX_KV_QUANT_SCHEME", llm_section.get("kv_quant_scheme")
-        ),
-        llamacpp_preset=_get_optional("LLAMACPP_PRESET", llm_section.get("preset")),
-        llm_audio_input=str(
-            _get_optional("LLM_AUDIO_INPUT", llm_section.get("audio_input")) or ""
-        ).lower()
-        == "true",
-        # Cloud models (optional when running local)
-        cloud_stt_model=_get_optional("CLOUD_STT_MODEL", cloud.get("stt_model")),
-        cloud_tts_model=_get_optional("CLOUD_TTS_MODEL", cloud.get("tts_model")),
-        cloud_llm_model=_get_optional("CLOUD_LLM_MODEL", cloud.get("llm_model")),
-        cloud_tts_voice=_get_optional("CLOUD_TTS_VOICE", cloud.get("tts_voice")),
-        # Local models (optional when running cloud)
-        local_stt_model=_get_optional("LOCAL_STT_MODEL", local.get("stt_model")),
-        local_tts_model=_get_optional("LOCAL_TTS_MODEL", local.get("tts_model")),
-        local_llm_model=_get_optional("LOCAL_LLM_MODEL", llm_section.get("llm_model")),
-        local_tts_voice=_get_optional("LOCAL_TTS_VOICE", local.get("tts_voice")),
-        # Required settings
-        agent_instructions=_get("AGENT_INSTRUCTIONS", agent.get("instructions")),
-        tool_call_filler=_get_optional(
-            "TOOL_CALL_FILLER", agent.get("tool_call_filler")
-        ),
+        tts_url=_get_optional("TTS_URL", local.get("tts_url")),
+        llm_url=_get_optional("LLM_URL", local.get("llm_url")),
+        stt_models=stt_models,
+        llm_models=llm_models,
+        tts_models=tts_models,
+        active_stt=active_stt,
+        active_llm=active_llm,
+        active_tts=active_tts,
         vad_threshold=float(_get("VAD_THRESHOLD", vad.get("threshold"))),
         vad_silence_ms=int(_get("VAD_SILENCE_MS", vad.get("silence_ms"))),
         enable_mcp=_get("ENABLE_MCP", general.get("enable_mcp")).lower() == "true",
@@ -212,51 +362,51 @@ def load_settings() -> Settings:
         show_metrics=_get("SHOW_METRICS", display.get("show_metrics")).lower()
         == "true",
         sample_rate=int(_get("SAMPLE_RATE", audio.get("sample_rate"))),
+        agent_instructions=_get("AGENT_INSTRUCTIONS", agent.get("instructions")),
+        tool_call_filler=_get_optional(
+            "TOOL_CALL_FILLER", agent.get("tool_call_filler")
+        ),
+        model_instruction_snippets={
+            str(k): str(v) for k, v in agent.get("model-instructions", {}).items()
+        },
     )
 
-    # Validate mode-specific required fields
-    try:
-        settings.stt_model
-        settings.tts_model
-        settings.llm_model
-    except ConfigError:
-        raise
-    if settings.voice_mode == "local":
-        if not settings.mlx_audio_url:
-            raise ConfigError("Missing config: local.audio_url in config.toml")
-        if not settings.stt_url:
-            raise ConfigError("Missing config: local.stt_url in config.toml")
-        if not settings.mlx_llm_url:
-            raise ConfigError("Missing config: local.llm_url in config.toml")
-        if settings.mlx_llm_server not in ("mlx-vlm", "mlx-lm", "llamacpp"):
-            raise ConfigError(
-                f"Invalid local.llm_server: '{settings.mlx_llm_server}'"
-                " (must be 'mlx-vlm', 'mlx-lm', or 'llamacpp')"
-            )
-        if settings.mlx_llm_server == "llamacpp":
-            if not settings.llamacpp_preset:
-                raise ConfigError(
-                    "Missing config: preset in [local.llamacpp] in config.toml"
-                )
-            preset_path = _PROJECT_ROOT / settings.llamacpp_preset
-            if not preset_path.exists():
-                raise ConfigError(
-                    f"llamacpp preset file not found: {preset_path}\n"
-                    "Copy models.ini.example to models.ini and customize it."
-                )
-    if settings.voice_mode == "cloud" and not settings.openai_api_key:
-        raise ConfigError("Missing config: OPENAI_API_KEY in .env")
+    _validate_active_requirements(settings)
 
-    # Append model-specific instruction snippets
-    model_instructions = agent.get("model-instructions", {})
-    if model_instructions:
-        active_models = [
-            settings.stt_model.lower(),
-            settings.tts_model.lower(),
-            settings.llm_model.lower(),
-        ]
-        for pattern, text in model_instructions.items():
-            if any(pattern in m for m in active_models):
-                settings.agent_instructions += str(text)
+    # Append model-specific instruction snippets for whatever's currently active.
+    active_model_names = [
+        settings.stt_model.lower(),
+        settings.tts_model.lower(),
+        settings.llm_model.lower(),
+    ]
+    for pattern, text in settings.model_instruction_snippets.items():
+        if any(pattern in m for m in active_model_names):
+            settings.agent_instructions += text
 
     return settings
+
+
+def _validate_active_requirements(settings: Settings) -> None:
+    """Check the URL/API-key requirements implied by the current active models."""
+    active = [settings.stt, settings.llm, settings.tts]
+    needs_cloud = any(m.provider == "cloud" for m in active)
+    needs_local_stt = settings.stt.provider == "local"
+    needs_local_llm = settings.llm.provider == "local"
+    needs_local_tts = settings.tts.provider == "local"
+
+    if needs_cloud and not settings.openai_api_key:
+        raise ConfigError(
+            "Active selection includes a cloud model but OPENAI_API_KEY is not set (check .env)."
+        )
+    if needs_local_stt and not settings.stt_url:
+        raise ConfigError(
+            "Active STT model is local but [local].stt_url is not set in config.toml."
+        )
+    if needs_local_llm and not settings.llm_url:
+        raise ConfigError(
+            "Active LLM model is local but [local].llm_url is not set in config.toml."
+        )
+    if needs_local_tts and not settings.tts_url:
+        raise ConfigError(
+            "Active TTS model is local but [local].tts_url is not set in config.toml."
+        )

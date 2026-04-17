@@ -13,7 +13,6 @@ from agents.voice import AudioInput
 
 from .audio import AudioPlayer, VADRecorder, record_push_to_talk
 from .config import Settings
-from .providers import TranscriptVoiceWorkflow, create_pipeline
 
 if TYPE_CHECKING:
     from .app import VoiceAgentApp
@@ -25,22 +24,29 @@ set_tracing_disabled(True)
 
 async def _process_turn(
     segment: bytes | object,
-    workflow: TranscriptVoiceWorkflow,
-    pipeline: object,
     app: VoiceAgentApp,
     player: AudioPlayer,
     settings: Settings,
     server_manager: ServerManager | None,
 ) -> None:
-    """Process a single conversation turn (STT → LLM → TTS → playback)."""
+    """Process a single conversation turn (STT → LLM → TTS → playback).
+
+    Reads `app.workflow` / `app.pipeline` fresh so a runtime model switch
+    applies on the next turn without restarting the loop.
+    """
     import numpy as np
+
+    workflow = app.workflow
+    pipeline = app.pipeline
+    if workflow is None or pipeline is None:
+        return
 
     audio_input = AudioInput(buffer=np.asarray(segment, dtype=np.int16))
     turn_start = time.monotonic()
     workflow.turn_start_time = turn_start
 
     try:
-        result = await pipeline.run(audio_input)  # type: ignore[union-attr]
+        result = await pipeline.run(audio_input)
         tts_total, tts_first = await player.play(result, app)
 
         if settings.show_metrics:
@@ -74,13 +80,11 @@ async def _run_push_to_talk(
     server_manager: ServerManager | None = None,
     mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, app, mcp_servers=mcp_servers)
     player = AudioPlayer()
     app.ready_banner(settings)
 
     while not app.quit_event.is_set():
         app.ready_for_key()
-        # Wait for K (queued by the app's binding) or quit
         await app.record_key_queue.get()
         if app.quit_event.is_set():
             return
@@ -97,9 +101,8 @@ async def _run_push_to_talk(
             continue
 
         app.processing(len(buffer) / settings.sample_rate)
-        await _process_turn(
-            buffer, workflow, pipeline, app, player, settings, server_manager
-        )
+        async with app._switch_lock:
+            await _process_turn(buffer, app, player, settings, server_manager)
         app.listening()
 
 
@@ -109,7 +112,6 @@ async def _run_vad(
     server_manager: ServerManager | None = None,
     mcp_servers: list | None = None,
 ) -> None:
-    workflow, pipeline = create_pipeline(settings, app, mcp_servers=mcp_servers)
     recorder = VADRecorder(settings, app)
     player = AudioPlayer()
     app.ready_banner(settings)
@@ -118,7 +120,6 @@ async def _run_vad(
     # Watch app.is_muted and mirror it onto the recorder.
     async def mute_watcher() -> None:
         last = app.is_muted
-        # Apply initial state
         if last:
             recorder.mute()
         while not app.quit_event.is_set():
@@ -129,9 +130,6 @@ async def _run_vad(
             if app.is_muted:
                 recorder.mute()
             else:
-                # Only resume listening when we're not in the middle of a
-                # response (VAD is always muted during response to prevent
-                # echo from the speakers feeding back into the mic).
                 if not app.responding:
                     recorder.unmute()
 
@@ -141,7 +139,6 @@ async def _run_vad(
 
     try:
         while not app.quit_event.is_set():
-            # Wait for next speech segment from VAD
             try:
                 segment = await asyncio.wait_for(recorder.segments.get(), timeout=0.5)
             except TimeoutError:
@@ -150,56 +147,50 @@ async def _run_vad(
             if app.quit_event.is_set():
                 break
 
-            app.processing(len(segment) / settings.sample_rate)
+            # Wait for any in-flight model switch to finish before starting a
+            # turn, so we never run a turn against a half-torn-down pipeline.
+            await app._switch_lock.acquire()
+            try:
+                app.processing(len(segment) / settings.sample_rate)
 
-            # Mute VAD during response to prevent echo from speakers
-            app.responding = True
-            app.interrupt_event.clear()
-            if not app.is_muted:
-                recorder.mute()
+                # Mute VAD during response to prevent echo from speakers
+                app.responding = True
+                app.interrupt_event.clear()
+                if not app.is_muted:
+                    recorder.mute()
 
-            # Run the turn
-            current_task = asyncio.create_task(
-                _process_turn(
-                    segment,
-                    workflow,
-                    pipeline,
-                    app,
-                    player,
-                    settings,
-                    server_manager,
+                current_task = asyncio.create_task(
+                    _process_turn(segment, app, player, settings, server_manager)
                 )
-            )
 
-            # Wait for either turn completion or interruption
-            interrupt_task = asyncio.create_task(app.interrupt_event.wait())
-            done, _ = await asyncio.wait(
-                [current_task, interrupt_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+                interrupt_task = asyncio.create_task(app.interrupt_event.wait())
+                done, _ = await asyncio.wait(
+                    [current_task, interrupt_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-            if interrupt_task in done:
-                # User pressed Space (or clicked Interrupt) to interrupt
-                player.stop()
-                current_task.cancel()
-                try:
-                    await current_task
-                except asyncio.CancelledError:
-                    pass
-                workflow.save_partial_history()
-                app.interrupted()
-            else:
-                interrupt_task.cancel()
+                if interrupt_task in done:
+                    player.stop()
+                    current_task.cancel()
+                    try:
+                        await current_task
+                    except asyncio.CancelledError:
+                        pass
+                    if app.workflow is not None:
+                        app.workflow.save_partial_history()
+                    app.interrupted()
+                else:
+                    interrupt_task.cancel()
 
-            # Resume VAD
-            app.responding = False
-            if not app.is_muted:
-                recorder.unmute()
-                app.listening()
-            else:
-                app.muted()
+                app.responding = False
+                if not app.is_muted:
+                    recorder.unmute()
+                    app.listening()
+                else:
+                    app.muted()
+            finally:
+                app._switch_lock.release()
     finally:
-        # Clean up all tasks
         if current_task and not current_task.done():
             current_task.cancel()
             try:
@@ -226,9 +217,9 @@ async def run_pipeline_loops(
 ) -> None:
     """Entry point used by VoiceAgentApp._run_pipeline.
 
-    The heavy-lifting (MCP connect, server startup) is done by the app so it
-    can drive the splash screen — by the time we get here, everything is up
-    and the main UI is visible.
+    The heavy-lifting (server reconcile, MCP connect, initial pipeline build)
+    is done by the app before we get here — we just drive the main loop and
+    read `app.workflow` / `app.pipeline` per turn.
     """
     if settings.input_mode == "vad":
         await _run_vad(settings, app, server_manager, mcp_servers)

@@ -1,0 +1,13 @@
+# Personal model preferences. Copy this file to `preferences.toml` to pin
+# which STT / LLM / TTS models the app uses on launch. The real file is
+# gitignored and is also rewritten whenever you apply a new set from the
+# Switch modal (press 's' in the app).
+#
+# Each value must match the `name` field of an entry in config.toml's
+# [[stt]] / [[llm]] / [[tts]] arrays. Unknown names fall back to the first
+# catalog entry for that role (and the app prints a warning at startup).
+
+[active]
+stt = "whisper-turbo"
+llm = "gpt-5.4-mini"
+tts = "kokoro"

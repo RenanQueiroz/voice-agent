@@ -170,3 +170,51 @@ SplashScreen {
     height: 1;
     width: 100%;
 }
+
+/* ── Switch modal ─────────────────────────────────────── */
+
+ModelSwitchScreen {
+    align: center middle;
+    background: $surface 60%;
+}
+
+#switch-panel {
+    width: 60;
+    height: auto;
+    max-height: 90%;
+    border: round $accent;
+    padding: 0 2;
+    background: $panel;
+}
+
+#switch-title {
+    width: 100%;
+    content-align: center middle;
+    color: $accent;
+    text-style: bold;
+}
+
+#switch-rows {
+    height: auto;
+}
+
+.switch-label {
+    width: 100%;
+    color: $text-muted;
+    text-style: dim;
+}
+
+#switch-rows > Select {
+    width: 100%;
+}
+
+#switch-buttons {
+    height: auto;
+    width: 100%;
+    align-horizontal: center;
+}
+
+#switch-buttons > Button {
+    margin: 0 1;
+    min-width: 16;
+}

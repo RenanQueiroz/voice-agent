@@ -16,7 +16,14 @@ import httpx
 import numpy as np
 from openai import AsyncOpenAI
 
-from agents import Agent, Runner
+from agents import (
+    Agent,
+    CodeInterpreterTool,
+    FileSearchTool,
+    Runner,
+    Tool,
+    WebSearchTool,
+)
 from agents.mcp import MCPServer
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
@@ -32,7 +39,7 @@ from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
 from agents.voice.utils import get_sentence_based_splitter
 
-from .config import Settings
+from .config import ModelConfig, Settings
 from .display import TurnMetrics
 
 # Minimum character count before text is sent to TTS (matches SDK's _add_text threshold)
@@ -331,21 +338,47 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                 self.display.agent_end()
 
 
+def _hosted_tools(llm: ModelConfig) -> list[Tool]:
+    """Instantiate the OpenAI-hosted tools configured on a cloud LLM."""
+    tools: list[Tool] = []
+    for name in llm.hosted_tools:
+        if name == "web_search":
+            tools.append(WebSearchTool())
+        elif name == "code_interpreter":
+            tools.append(
+                CodeInterpreterTool(
+                    tool_config={
+                        "type": "code_interpreter",
+                        "container": {"type": "auto"},
+                    }
+                )
+            )
+        elif name == "file_search":
+            tools.append(
+                FileSearchTool(
+                    vector_store_ids=list(llm.file_search_vector_stores),
+                    max_num_results=llm.file_search_max_results,
+                )
+            )
+    return tools
+
+
 def create_agent(
     settings: Settings,
     mcp_servers: list[MCPServer] | None = None,
 ) -> Agent:
-    if settings.voice_mode == "local":
+    llm = settings.llm
+    if llm.provider == "local":
         client = AsyncOpenAI(
-            base_url=f"{settings.mlx_llm_url}/v1",
+            base_url=f"{settings.llm_url}/v1",
             api_key="not-needed",
         )
         model = OpenAIChatCompletionsModel(
-            model=settings.llm_model,
+            model=llm.model,
             openai_client=client,
         )
     else:
-        model = settings.llm_model  # type: ignore[assignment]
+        model = llm.model  # type: ignore[assignment]
 
     instructions = _expand_instructions(settings.agent_instructions)
 
@@ -354,6 +387,7 @@ def create_agent(
         instructions=instructions,
         model=model,
         mcp_servers=mcp_servers or [],
+        tools=_hosted_tools(llm),
     )
 
 
@@ -420,9 +454,10 @@ def _eager_sentence_splitter(
 
 
 def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
-    if settings.voice_mode == "local":
+    tts = settings.tts
+    if tts.provider == "local":
         provider = OpenAIVoiceModelProvider(
-            base_url=f"{settings.mlx_audio_url}/v1",
+            base_url=f"{settings.tts_url}/v1",
             api_key="not-needed",
         )
     else:
@@ -431,7 +466,7 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
     return VoicePipelineConfig(
         model_provider=provider,
         tts_settings=TTSModelSettings(
-            voice=settings.tts_voice if settings.tts_voice else None,  # type: ignore[arg-type]
+            voice=tts.voice if tts.voice else None,  # type: ignore[arg-type]
             text_splitter=_eager_sentence_splitter(),
         ),
         tracing_disabled=True,
@@ -453,24 +488,27 @@ def create_pipeline(
     )
     config = create_pipeline_config(settings)
 
-    # For local mode, use StreamingTTSModel for server-side streaming
-    tts_model: str | StreamingTTSModel = settings.tts_model
-    if settings.voice_mode == "local":
+    tts = settings.tts
+    tts_model: str | StreamingTTSModel = tts.model
+    if tts.provider == "local":
         tts_client = AsyncOpenAI(
-            base_url=f"{settings.mlx_audio_url}/v1",
+            base_url=f"{settings.tts_url}/v1",
             api_key="not-needed",
         )
         tts_model = StreamingTTSModel(
-            model=settings.tts_model,
+            model=tts.model,
             openai_client=tts_client,
         )
 
-    # For local mode, use WhisperCppSTTModel for whisper.cpp server
-    stt_model: str | STTModel = settings.stt_model
-    if settings.voice_mode == "local" and settings.stt_url:
-        whisper_stt = WhisperCppSTTModel(settings.stt_model, settings.stt_url)
-        if settings.llm_audio_input:
-            # Audio-input mode: pass audio directly to LLM, STT runs in background
+    stt = settings.stt
+    llm = settings.llm
+    stt_model: str | STTModel = stt.model
+    if stt.provider == "local" and settings.stt_url:
+        whisper_stt = WhisperCppSTTModel(stt.model, settings.stt_url)
+        # Audio-passthrough only makes sense when the LLM is also local and
+        # accepts audio directly — otherwise the audio blob never reaches a
+        # model that can consume it.
+        if llm.provider == "local" and llm.audio_input:
             stt_model = AudioPassthroughSTTModel(workflow, whisper_stt)
         else:
             stt_model = whisper_stt

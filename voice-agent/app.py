@@ -25,6 +25,7 @@ from .widgets import (
     AgentTurn,
     ErrorCard,
     ModelRow,
+    ModelSwitchScreen,
     NoticeCard,
     SplashScreen,
     StateRow,
@@ -35,7 +36,11 @@ from .widgets import (
 )
 
 if TYPE_CHECKING:
+    from agents.voice import VoicePipeline
+
     from .config import Settings
+    from .providers import TranscriptVoiceWorkflow
+    from .servers import ServerManager
 
 
 logging.getLogger("openai.agents").setLevel(logging.CRITICAL)
@@ -52,6 +57,7 @@ class VoiceAgentApp(App[None]):
         Binding("q", "quit", "Quit", show=False),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
         Binding("k", "record_key", "Record", show=False),
+        Binding("s", "open_settings", "Switch models", show=False),
     ]
 
     def __init__(self, settings: Settings) -> None:
@@ -76,6 +82,17 @@ class VoiceAgentApp(App[None]):
 
         # Splash handle (set while setup is running)
         self._splash: SplashScreen | None = None
+
+        # Pipeline state — rebuilt by switch_models; read fresh per turn by
+        # the loop functions in pipeline.py so swaps take effect cleanly.
+        self.workflow: TranscriptVoiceWorkflow | None = None
+        self.pipeline: VoicePipeline | None = None
+        self.server_manager: ServerManager | None = None
+        self.mcp_servers: list = []
+
+        # Serialize switches and keep the pipeline from processing a turn
+        # while we're reconciling servers / rebuilding the workflow.
+        self._switch_lock = asyncio.Lock()
 
     # ── Compose & mount ───────────────────────────────────
 
@@ -113,23 +130,22 @@ class VoiceAgentApp(App[None]):
         # Lazy imports to keep app startup fast and to break cycles.
         from .mcp import load_mcp_servers
         from .pipeline import run_pipeline_loops
+        from .providers import create_pipeline
         from .servers import ServerManager
 
-        server_manager: ServerManager | None = None
-        mcp_servers: list = []
+        self.server_manager = ServerManager(self.settings, self)
+        self.mcp_servers = []
 
         try:
-            if self.settings.voice_mode == "local":
-                server_manager = ServerManager(self.settings, self)
-                ok = await server_manager.start()
-                if not ok:
-                    self.setup_failed()
-                    await asyncio.sleep(3)
-                    self.exit()
-                    return
+            ok = await self.server_manager.reconcile()
+            if not ok:
+                self.setup_failed()
+                await asyncio.sleep(3)
+                self.exit()
+                return
 
-            mcp_servers = load_mcp_servers() if self.settings.enable_mcp else []
-            for server in mcp_servers:
+            self.mcp_servers = load_mcp_servers() if self.settings.enable_mcp else []
+            for server in self.mcp_servers:
                 try:
                     await server.connect()
                 except Exception as e:
@@ -137,12 +153,17 @@ class VoiceAgentApp(App[None]):
                     self.exit()
                     return
 
-            if mcp_servers:
+            if self.mcp_servers:
                 tool_names: list[str] = []
-                for server in mcp_servers:
+                for server in self.mcp_servers:
                     tools = await server.list_tools()
                     tool_names.extend(t.name for t in tools)
                 self.set_mcp_tools(tool_names)
+
+            # Build the initial workflow + pipeline
+            self.workflow, self.pipeline = create_pipeline(
+                self.settings, self, mcp_servers=self.mcp_servers
+            )
 
             # Setup done — dismiss splash and show the main UI
             if self._splash is not None:
@@ -151,15 +172,17 @@ class VoiceAgentApp(App[None]):
 
             self._set_state("listening")
 
-            await run_pipeline_loops(self.settings, self, server_manager, mcp_servers)
+            await run_pipeline_loops(
+                self.settings, self, self.server_manager, self.mcp_servers
+            )
         finally:
-            for server in mcp_servers:
+            for server in self.mcp_servers:
                 try:
                     await server.cleanup()
                 except Exception:
                     pass
-            if server_manager is not None:
-                server_manager.stop()
+            if self.server_manager is not None:
+                self.server_manager.stop()
             self.exit()
 
     # ── Actions (keyboard + click both route here) ────────
@@ -194,11 +217,110 @@ class VoiceAgentApp(App[None]):
         except Exception:
             pass
 
+    def action_open_settings(self) -> None:
+        """Open the model-switch modal. Blocked while responding."""
+        if self.responding:
+            self._mount_card(
+                NoticeCard("Finish the current response before switching models.")
+            )
+            return
+        if self._switch_lock.locked():
+            return
+
+        def _apply(result: tuple[str, str, str] | None) -> None:
+            if result is None:
+                return
+            stt, llm, tts = result
+            # No-op if nothing actually changed
+            if (
+                stt == self.settings.active_stt
+                and llm == self.settings.active_llm
+                and tts == self.settings.active_tts
+            ):
+                return
+            self.run_worker(
+                self.switch_models(stt, llm, tts),
+                exclusive=False,
+                name="switch",
+            )
+
+        self.push_screen(ModelSwitchScreen(self.settings), _apply)
+
+    async def switch_models(self, stt: str, llm: str, tts: str) -> None:
+        """Apply a new set of active models: reconcile servers, rebuild pipeline."""
+        from .providers import create_pipeline
+
+        async with self._switch_lock:
+            if self.server_manager is None:
+                return
+            prev_stt = self.settings.active_stt
+            prev_llm = self.settings.active_llm
+            prev_tts = self.settings.active_tts
+
+            self.settings.active_stt = stt
+            self.settings.active_llm = llm
+            self.settings.active_tts = tts
+
+            self._set_state("processing")
+            notice = NoticeCard("Switching models…")
+            self._mount_card(notice)
+
+            def _remove_notice() -> None:
+                try:
+                    notice.remove()
+                except Exception:
+                    pass
+
+            ok = await self.server_manager.reconcile()
+            if not ok:
+                self.settings.active_stt = prev_stt
+                self.settings.active_llm = prev_llm
+                self.settings.active_tts = prev_tts
+                _remove_notice()
+                self._mount_error(
+                    "Switch failed",
+                    "Could not start the required local server. Reverted to previous selection.",
+                )
+                self._update_models()
+                self._set_state("listening")
+                return
+
+            try:
+                self.workflow, self.pipeline = create_pipeline(
+                    self.settings, self, mcp_servers=self.mcp_servers
+                )
+            except Exception as e:
+                self.settings.active_stt = prev_stt
+                self.settings.active_llm = prev_llm
+                self.settings.active_tts = prev_tts
+                _remove_notice()
+                self._mount_error("Switch failed", str(e))
+                self._update_models()
+                self._set_state("listening")
+                return
+
+            # Persist the new choice
+            try:
+                from .preferences import save_preferences
+
+                save_preferences(stt, llm, tts)
+            except Exception as e:
+                self._mount_error(
+                    "Preferences not saved",
+                    f"Models switched but preferences.toml could not be written: {e}",
+                )
+
+            _remove_notice()
+            self._update_models()
+            self._set_state("listening")
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-mute":
             self.action_toggle_mute()
         elif event.button.id == "btn-interrupt":
             self.action_interrupt()
+        elif event.button.id == "btn-switch":
+            self.action_open_settings()
         elif event.button.id == "btn-quit":
             self.run_worker(self.action_quit())
 
@@ -220,12 +342,14 @@ class VoiceAgentApp(App[None]):
         # turn), fill it. Otherwise mount a fresh card. Reserving up-front
         # keeps the visual order correct when STT runs async alongside the
         # LLM (audio-passthrough mode).
+        stt_name = self.settings.stt.display_name
         if self._pending_user_turn is not None:
             self._pending_user_turn.text = text
             self._pending_user_turn.stt_seconds = stt_seconds
+            self._pending_user_turn.stt_name = stt_name
             self._pending_user_turn = None
         else:
-            self._mount_card(UserTurn(text, stt_seconds))
+            self._mount_card(UserTurn(text, stt_seconds, stt_name=stt_name))
 
     def agent_start(self) -> None:
         card = AgentTurn()
@@ -276,7 +400,11 @@ class VoiceAgentApp(App[None]):
         except Exception:
             return
         if turns:
-            turns[-1].set_metrics(m)
+            turns[-1].set_metrics(
+                m,
+                llm_name=self.settings.llm.display_name,
+                tts_name=self.settings.tts.display_name,
+            )
 
     # ── State transitions ─────────────────────────────────
 
@@ -291,6 +419,7 @@ class VoiceAgentApp(App[None]):
         try:
             btn = self.query_one("#btn-interrupt", Button)
             btn.disabled = not enabled
+            btn.display = enabled
         except Exception:
             pass
 
@@ -378,7 +507,7 @@ class VoiceAgentApp(App[None]):
         # — which may fire before the async STT finishes — mounts its card
         # *below* the user turn, not above it.
         if self._pending_user_turn is None:
-            placeholder = UserTurn()
+            placeholder = UserTurn(stt_name=self.settings.stt.display_name)
             self._pending_user_turn = placeholder
             self._mount_card(placeholder)
 
@@ -394,6 +523,8 @@ class VoiceAgentApp(App[None]):
         self.settings = settings
         self._update_models()
         self._set_state("listening")
+        # Interrupt is only relevant while the agent is responding.
+        self._set_interrupt_enabled(False)
 
     # ── Turn lifecycle (no-ops kept for API compat) ───────
 
@@ -494,14 +625,18 @@ class VoiceAgentApp(App[None]):
         self._mount_error("API Error", "\n".join(parts))
 
     def connection_error(self, settings: Settings) -> None:
-        if settings.voice_mode == "local":
-            msg = (
-                "Could not reach the local servers.\n"
-                f"  STT/TTS: {settings.mlx_audio_url}\n"
-                f"  LLM:     {settings.mlx_llm_url}"
-            )
-        else:
-            msg = "Could not reach the OpenAI API. Check your connection and OPENAI_API_KEY."
+        lines: list[str] = []
+        if settings.stt.provider == "local":
+            lines.append(f"  STT: {settings.stt_url}")
+        if settings.tts.provider == "local":
+            lines.append(f"  TTS: {settings.tts_url}")
+        if settings.llm.provider == "local":
+            lines.append(f"  LLM: {settings.llm_url}")
+        if any(
+            m.provider == "cloud" for m in (settings.stt, settings.llm, settings.tts)
+        ):
+            lines.append("  Cloud: https://api.openai.com")
+        msg = "Could not reach a required endpoint.\n" + "\n".join(lines)
         self._mount_error("Connection Error", msg)
 
     def auth_error(self, message: str) -> None:

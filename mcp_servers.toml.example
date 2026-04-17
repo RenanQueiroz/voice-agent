@@ -16,6 +16,7 @@
 #
 # Common options (all types):
 #   cache_tools = true            # Cache tool list for lower latency (default: true)
+#   enabled = true                # Set to false to skip this server without deleting it (default: true)
 #
 # Environment variable substitution:
 #   Use ${VAR_NAME} in any string value to reference variables from .env or the environment.
