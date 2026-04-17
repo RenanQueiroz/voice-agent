@@ -1,0 +1,75 @@
+# Model catalogs. Each [[stt]] / [[llm]] / [[tts]] entry is a picker option
+# that appears in the Switch modal (press `S` in the app). The first entry
+# for each role is used as the default when preferences.toml doesn't exist
+# (or references a name that's no longer in the catalog).
+#
+# The "(local)" / "(cloud)" suffix is added to the display name automatically
+# from `provider` — don't include it in `name`.
+
+# ── STT catalog ───────────────────────────────────────────
+[[stt]]
+name     = "whisper-turbo"
+provider = "local"
+model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
+
+[[stt]]
+name     = "gpt-4o-transcribe"
+provider = "cloud"
+model    = "gpt-4o-transcribe"
+
+# ── LLM catalog ───────────────────────────────────────────
+# Local entries must set `server` (mlx-vlm / mlx-lm / llamacpp). `audio_input`
+# lets the LLM accept audio directly, skipping STT latency; only meaningful
+# when BOTH the STT and LLM are local (they share the same whisper audio
+# buffer — see providers.py).
+[[llm]]
+name        = "gemma-4-e4b-it (llamacpp)"
+provider    = "local"
+server      = "llamacpp"
+model       = "gemma-4-e4b-it"     # must match a section alias in the preset
+preset      = "llamacpp-models.ini"
+audio_input = true
+
+[[llm]]
+name            = "gemma-4-e4b-it (mlx-vlm)"
+provider        = "local"
+server          = "mlx-vlm"
+model           = "mlx-community/gemma-4-e4b-it-4bit"
+audio_input     = true
+kv_bits         = 3.5
+kv_quant_scheme = "turboquant"
+
+[[llm]]
+name     = "gemma-3-4b-it (mlx-lm)"
+provider = "local"
+server   = "mlx-lm"
+model    = "mlx-community/gemma-3-4b-it-4bit"
+
+[[llm]]
+name     = "gpt-5.4-mini"
+provider = "cloud"
+model    = "gpt-5.4-mini"
+# OpenAI-hosted tools. Allowed: "web_search", "code_interpreter", "file_search".
+# These only work with cloud LLMs (provider = "cloud"). Leave empty to disable.
+hosted_tools = ["web_search", "code_interpreter"]
+# For hosted_tools = ["file_search", ...], add:
+#   file_search_vector_stores = ["vs_abc123"]
+#   file_search_max_results   = 5
+
+# ── TTS catalog ───────────────────────────────────────────
+[[tts]]
+name     = "kokoro"
+provider = "local"
+model    = "mlx-community/Kokoro-82M-bf16"
+voice    = "af_heart"
+
+[[tts]]
+name     = "chatterbox-turbo"
+provider = "local"
+model    = "mlx-community/chatterbox-turbo-4bit"
+
+[[tts]]
+name     = "gpt-4o-mini-tts"
+provider = "cloud"
+model    = "gpt-4o-mini-tts"
+voice    = "alloy"

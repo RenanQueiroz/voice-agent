@@ -43,6 +43,19 @@ def _load_toml() -> dict:
         return tomllib.load(f)
 
 
+def _load_models_toml() -> dict:
+    """Load `models.toml` (the role catalogs). Missing file is an error —
+    the app needs at least one model per role."""
+    path = _PROJECT_ROOT / "models.toml"
+    if not path.exists():
+        raise ConfigError(
+            f"models.toml not found at {path}. This file holds the "
+            "[[stt]] / [[llm]] / [[tts]] catalogs — see the example in the repo."
+        )
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
 def _get(env_key: str, toml_value: Any) -> str:
     env = os.getenv(env_key)
     if env is not None:
@@ -85,7 +98,7 @@ class ModelConfig:
 
     # Local-LLM-only
     server: LLMServer | None = None
-    preset: str | None = None  # llamacpp models.ini path, relative to project root
+    preset: str | None = None  # llamacpp preset path (llamacpp-models.ini), relative to project root
     kv_bits: str | None = None
     kv_quant_scheme: str | None = None
     audio_input: bool = False  # LLM accepts audio directly
@@ -301,13 +314,14 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                 if not preset or not isinstance(preset, str):
                     raise ConfigError(
                         f"[[llm]] '{name}' (server=llamacpp) needs a 'preset' "
-                        f"path, e.g. preset = 'models.ini'"
+                        f"path, e.g. preset = 'llamacpp-models.ini'"
                     )
                 preset_path = _PROJECT_ROOT / preset
                 if not preset_path.exists():
                     raise ConfigError(
                         f"[[llm]] '{name}' preset file not found: {preset_path}. "
-                        "Copy models.ini.example to models.ini and customize it."
+                        "Copy llamacpp-models.ini.example to llamacpp-models.ini "
+                        "and customize it."
                     )
                 config.preset = preset
 
@@ -338,6 +352,15 @@ def load_settings() -> Settings:
             "The app now uses per-role catalogs — see the top of the updated "
             "config.toml in this repo for the new format."
         )
+    # And detect the previous interim format where model catalogs lived in
+    # config.toml itself.
+    if any(role in t for role in ("stt", "llm", "tts")):
+        raise ConfigError(
+            "config.toml still contains [[stt]] / [[llm]] / [[tts]] entries. "
+            "These have moved to models.toml — cut them out of config.toml and "
+            "paste them into models.toml (see models.toml in the repo for the "
+            "new layout)."
+        )
 
     general = t.get("general", {})
     local = t.get("local", {})
@@ -353,9 +376,10 @@ def load_settings() -> Settings:
             f"Invalid input_mode: '{input_mode}' (must be 'push_to_talk' or 'vad')"
         )
 
-    stt_models = _parse_catalog("stt", list(t.get("stt", [])))
-    llm_models = _parse_catalog("llm", list(t.get("llm", [])))
-    tts_models = _parse_catalog("tts", list(t.get("tts", [])))
+    models_toml = _load_models_toml()
+    stt_models = _parse_catalog("stt", list(models_toml.get("stt", [])))
+    llm_models = _parse_catalog("llm", list(models_toml.get("llm", [])))
+    tts_models = _parse_catalog("tts", list(models_toml.get("tts", [])))
 
     prefs = load_preferences()
     active_stt = _resolve_active("stt", prefs.get("stt"), stt_models)

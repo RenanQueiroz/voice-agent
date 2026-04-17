@@ -17,7 +17,7 @@ llamacpp/
 whispercpp/
 
 # llama.cpp model preset (user-specific, like .env)
-models.ini
+llamacpp-models.ini
 
 # Active model selections (user-specific, written by the Switch modal)
 preferences.toml

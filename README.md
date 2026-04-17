@@ -71,13 +71,14 @@ All controls are also clickable buttons in the bottom footer. The Interrupt butt
 
 Config lives in three files at the project root:
 
-| File                | Purpose                                                                             | Checked in? |
-|---------------------|-------------------------------------------------------------------------------------|-------------|
-| `config.toml`       | Model catalogs, local server URLs, VAD, agent, display, audio                       | ✅          |
-| `preferences.toml`  | Active model name per role; auto-written by the Switch modal                        | ❌          |
-| `.env`              | Secrets (`OPENAI_API_KEY`)                                                          | ❌          |
-| `mcp_servers.toml`  | MCP server definitions                                                              | ❌          |
-| `models.ini`        | llama-server model preset file (only when any LLM uses `server = "llamacpp"`)       | ❌          |
+| File                    | Purpose                                                                         | Checked in? |
+|-------------------------|---------------------------------------------------------------------------------|-------------|
+| `config.toml`           | Local server URLs, VAD, agent, display, audio, shell tool                       | ✅          |
+| `models.toml`           | `[[stt]]` / `[[llm]]` / `[[tts]]` catalogs — the pickable models per role       | ✅          |
+| `preferences.toml`      | Active model name per role; auto-written by the Switch modal                    | ❌          |
+| `.env`                  | Secrets (`OPENAI_API_KEY`)                                                      | ❌          |
+| `mcp_servers.toml`      | MCP server definitions                                                          | ❌          |
+| `llamacpp-models.ini`   | llama-server preset (only when any LLM uses `server = "llamacpp"`)              | ❌          |
 
 Environment variables override `.env`, which overrides `config.toml`.
 
@@ -93,9 +94,35 @@ stt_url = "http://localhost:9000"  # whisper-server
 tts_url = "http://localhost:8000"  # mlx-audio
 llm_url = "http://localhost:8080"  # mlx-vlm / mlx-lm / llama-server
 
+[vad]
+threshold  = 0.5                   # Silero speech probability threshold (0-1)
+silence_ms = 500                   # silence before a segment is closed
+
+[display]
+show_transcript = true
+show_metrics    = true             # inline STT / LLM / TTS / Total per turn
+
+[audio]
+sample_rate = 24000
+
+[shell]                            # optional shell tool with per-call user approval
+enabled      = false
+auto_approve = false               # true = run silently, no prompt (dangerous)
+
+[agent]
+instructions     = """You are a helpful voice assistant. Today is {date}."""
+tool_call_filler = "Give me just a moment."    # spoken while waiting for a tool call; optional
+```
+
+### models.toml structure
+
+The per-role model lists live in `models.toml` and are combined at launch
+with the `[local]` server URLs from `config.toml`. The `(local)` / `(cloud)`
+suffix is added automatically from `provider` — don't include it in `name`.
+
+```toml
 # ── STT catalog ─────────────────────────────────────
-# The "(local)" / "(cloud)" suffix is added automatically from `provider`.
-# The first entry is the default when preferences.toml is absent.
+# First entry is the default when preferences.toml is absent.
 [[stt]]
 name     = "whisper-turbo"
 provider = "local"
@@ -110,10 +137,10 @@ model    = "gpt-4o-transcribe"
 [[llm]]
 name        = "gemma-4-e4b-it (llamacpp)"
 provider    = "local"
-server      = "llamacpp"           # "mlx-vlm" | "mlx-lm" | "llamacpp"
-model       = "gemma-4-e4b-it"     # must match a section name in the preset
-preset      = "models.ini"
-audio_input = true                 # pass mic audio straight to the LLM (local-STT + local-LLM only)
+server      = "llamacpp"                # "mlx-vlm" | "mlx-lm" | "llamacpp"
+model       = "gemma-4-e4b-it"          # must match a section alias in the preset
+preset      = "llamacpp-models.ini"
+audio_input = true                      # pass mic audio straight to the LLM (local-STT + local-LLM only)
 
 [[llm]]
 name            = "gemma-4-e4b-it (mlx-vlm)"
@@ -121,8 +148,8 @@ provider        = "local"
 server          = "mlx-vlm"
 model           = "mlx-community/gemma-4-e4b-it-4bit"
 audio_input     = true
-kv_bits         = 3.5              # mlx-vlm only
-kv_quant_scheme = "turboquant"     # mlx-vlm only
+kv_bits         = 3.5                   # mlx-vlm only
+kv_quant_scheme = "turboquant"          # mlx-vlm only
 
 [[llm]]
 name     = "gpt-5.4-mini"
@@ -146,21 +173,6 @@ name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
 voice    = "alloy"
-
-[vad]
-threshold  = 0.5                   # Silero speech probability threshold (0-1)
-silence_ms = 500                   # silence before a segment is closed
-
-[display]
-show_transcript = true
-show_metrics    = true             # inline STT / LLM / TTS / Total per turn
-
-[audio]
-sample_rate = 24000
-
-[agent]
-instructions     = """You are a helpful voice assistant. Today is {date}."""
-tool_call_filler = "Give me just a moment."    # spoken while waiting for a tool call; optional
 ```
 
 #### Runtime variables in `[agent].instructions`

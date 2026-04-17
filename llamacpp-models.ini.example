@@ -1,6 +1,6 @@
 # llama-server model preset file.
-# Copy this to models.ini and customize for your setup.
-# Used with: llama-server --models-preset models.ini
+# Copy this to llamacpp-models.ini and customize for your setup.
+# Used with: llama-server --models-preset llamacpp-models.ini
 #
 # [*] applies to all models. Model-specific sections override global settings.
 # Keys correspond to llama-server CLI args (without leading dashes).

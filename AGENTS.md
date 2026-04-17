@@ -39,11 +39,12 @@ voice-agent/
 
 ## Configuration files
 
-- `config.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Shared fields in `[general]`, `[local]`, `[vad]`, `[display]`, `[audio]`, `[agent]`.
+- `config.toml` — committed. Everything that isn't a model catalog: `[general]`, `[local]` server URLs, `[vad]`, `[display]`, `[audio]`, `[agent]`, `[shell]`. Catalogs moved out of here (see `models.toml`).
+- `models.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. This is what the Switch modal picks from.
 - `preferences.toml` — gitignored. Three-line file `[active]` with the active `name` per role. Written by the Switch modal. Copy from `preferences.toml.example`.
 - `.env` — gitignored. `OPENAI_API_KEY` + any env overrides.
 - `mcp_servers.toml` — gitignored. MCP server definitions. Copy from `mcp_servers.toml.example`. Per-server `enabled = false` skips a server without deleting it.
-- `models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `server = "llamacpp"`. Copy from `models.ini.example`.
+- `llamacpp-models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `server = "llamacpp"`. Copy from `llamacpp-models.ini.example`.
 - `model_deps.toml` — committed. Maps name patterns to pip/brew deps.
 - `setup-whispercpp.sh` / `setup-llamacpp.sh` — committed.
 
