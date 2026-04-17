@@ -37,7 +37,6 @@ from agents.voice.model import (
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
-from agents.voice.utils import get_sentence_based_splitter
 
 from .config import ModelConfig, Settings
 from .display import TurnMetrics
@@ -460,31 +459,61 @@ def _expand_instructions(text: str) -> str:
     return text
 
 
+# A confident sentence boundary: one-or-more `.!?` followed by whitespace.
+# This can't match mid-decimal ("3.14" has no space after the dot between
+# the digits) and correctly matches ellipses and "?!" / "!?".
+_SENT_BOUNDARY_RE = re.compile(r"[.!?]+\s+")
+
+
 def _eager_sentence_splitter(
     min_length: int = _MIN_TTS_CHARS,
 ) -> Callable[[str], tuple[str, str]]:
-    """Sentence splitter that sends complete sentences to TTS immediately.
+    """Sentence splitter that sends complete sentences to TTS immediately,
+    without getting fooled by decimals and abbreviations mid-stream.
 
-    The SDK's default splitter always holds back the last sentence, waiting for a
-    second one before releasing the first.  This means pre-tool-call text like
-    "Let me look that up." sits in the buffer until the model's response arrives
-    after the tool finishes — defeating the purpose of speaking while waiting.
+    The SDK's default splitter both (a) holds back the last sentence waiting
+    for a second one — defeating the point of speaking while waiting for a
+    tool — and (b) treats any `.` / `!` / `?` as a sentence end, which breaks
+    streamed decimals: when the model has emitted "The value is 3." but not
+    yet "14 apples.", the splitter flushes "The value is 3." to TTS, which
+    then reads back "three" with no decimals.
 
-    This wrapper adds one rule: if the buffer is a single complete sentence
-    (ends with sentence-ending punctuation and meets the length threshold),
-    send it to TTS right away.
+    This implementation:
+      1. Flushes everything up to the *last* unambiguous boundary
+         (punctuation followed by whitespace) — decimals can't match since
+         they have no whitespace between the digits.
+      2. For the "eager" case of a buffer that ends exactly at a
+         sentence-ender with no trailing whitespace yet, it ONLY flushes
+         when the char before the punctuation is a non-digit. A digit-then-
+         dot at the very end of the buffer is ambiguous (could be decimal
+         in progress) and is held back until more text arrives or a real
+         whitespace separator appears.
     """
-    base = get_sentence_based_splitter(min_sentence_length=min_length)
 
     def splitter(text_buffer: str) -> tuple[str, str]:
-        # Default: returns all-but-last sentence when there are multiple
-        combined, remaining = base(text_buffer)
-        if combined:
-            return combined, remaining
-        # Single complete sentence — send it immediately
-        stripped = text_buffer.strip()
-        if stripped and stripped[-1] in ".!?" and len(stripped) >= min_length:
-            return stripped, ""
+        # 1) Unambiguous boundary inside the buffer (punctuation + space).
+        last_match = None
+        for m in _SENT_BOUNDARY_RE.finditer(text_buffer):
+            last_match = m
+        if last_match is not None:
+            end = last_match.end()
+            combined = text_buffer[:end]
+            remaining = text_buffer[end:]
+            if len(combined.strip()) >= min_length:
+                return combined, remaining
+            # If we found a boundary but what's before it is too short, fall
+            # through to the eager check — the full buffer may still be long
+            # enough to flush as one unit.
+
+        # 2) Eager flush: buffer ends with sentence-ending punctuation and
+        # nothing after. Only trust it if the char before the punctuation
+        # isn't a digit (else we might be mid-decimal, waiting on "14 …").
+        stripped = text_buffer.rstrip()
+        if stripped and stripped[-1] in ".!?":
+            prev = stripped[-2] if len(stripped) >= 2 else ""
+            if not prev.isdigit() and len(stripped) >= min_length:
+                return text_buffer, ""
+
         return "", text_buffer
 
     return splitter
