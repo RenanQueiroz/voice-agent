@@ -215,11 +215,13 @@ ModelSwitchScreen {
 }
 
 #switch-panel {
-    width: 60;
+    width: 80%;             /* scale with the terminal */
+    max-width: 80;          /* but cap so it doesn't look stretched */
+    min-width: 36;
     height: auto;
     max-height: 90%;
     border: round $accent;
-    padding: 0 2;
+    padding: 1 2;
     background: $panel;
 }
 
@@ -238,6 +240,7 @@ ModelSwitchScreen {
     width: 100%;
     color: $text-muted;
     text-style: dim;
+    margin-top: 1;          /* vertical gap between each role block */
 }
 
 #switch-rows > Select {
@@ -248,9 +251,12 @@ ModelSwitchScreen {
     height: auto;
     width: 100%;
     align-horizontal: center;
+    margin-top: 2;          /* clear visual gap above the action buttons */
 }
 
 #switch-buttons > Button {
+    width: 1fr;             /* share available width equally */
+    min-width: 1;           /* allow shrinking on narrow terminals */
+    max-width: 20;          /* cap on wide terminals */
     margin: 0 1;
-    min-width: 16;
 }
