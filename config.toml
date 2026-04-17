@@ -1,5 +1,4 @@
 [general]
-input_mode = "vad"                 # "push_to_talk" or "vad"
 enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 
 # ── Local server endpoints ────────────────────────────────
@@ -20,7 +19,7 @@ llm_url = "http://localhost:8080"  # mlx-vlm / mlx-lm / llama-server
 # Speech probability threshold (0.0-1.0). Higher = fewer false triggers.
 threshold  = 0.5
 # Milliseconds of silence after speech before triggering processing.
-silence_ms = 500
+silence_ms = 1000
 
 # ── Display ───────────────────────────────────────────────
 [display]

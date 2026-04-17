@@ -5,8 +5,8 @@ that `pipeline.py`, `providers.py`, `audio.py`, and `servers.py` can call into
 it unchanged. Internally those methods update reactive widgets and mount new
 conversation cards.
 
-The pipeline itself (MCP connect, server startup, VAD / push-to-talk loops)
-runs as a Textual worker started in `on_mount` so the UI stays responsive.
+The pipeline itself (MCP connect, server startup, VAD loop) runs as a
+Textual worker started in `on_mount` so the UI stays responsive.
 """
 
 from __future__ import annotations
@@ -57,7 +57,6 @@ class VoiceAgentApp(App[None]):
         Binding("m", "toggle_mute", "Mute", show=False),
         Binding("q", "quit", "Quit", show=False),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
-        Binding("k", "record_key", "Record", show=False),
         Binding("s", "open_settings", "Switch models", show=False),
         Binding("y", "approve", "Approve", show=False),
         Binding("n", "decline", "Decline", show=False),
@@ -71,7 +70,6 @@ class VoiceAgentApp(App[None]):
         # key bindings and button clicks set them.
         self.quit_event = asyncio.Event()
         self.interrupt_event = asyncio.Event()
-        self.record_key_queue: asyncio.Queue[None] = asyncio.Queue()
 
         # Shared UI state
         self.is_muted = False
@@ -210,20 +208,8 @@ class VoiceAgentApp(App[None]):
     async def action_quit(self) -> None:  # type: ignore[override]
         """Request a clean shutdown: the pipeline worker exits and calls self.exit()."""
         self.quit_event.set()
-        # Unblock anything waiting on record_key_queue
-        try:
-            self.record_key_queue.put_nowait(None)
-        except Exception:
-            pass
         # Fallback — if the worker is wedged, hard-exit after a moment
         self.set_timer(2.0, self.exit)
-
-    def action_record_key(self) -> None:
-        """K toggles recording in push-to-talk mode."""
-        try:
-            self.record_key_queue.put_nowait(None)
-        except Exception:
-            pass
 
     def action_approve(self) -> None:
         """Y: approve the pending shell command, if any."""
@@ -556,17 +542,6 @@ class VoiceAgentApp(App[None]):
     def unmuted(self) -> None:
         self.is_muted = False
         self.unmuted_ui()
-
-    def recording_start(self) -> None:
-        self._mount_card(NoticeCard("● Recording… (press K to stop)"))
-        self._set_state("speaking")
-
-    def recording_too_short(self) -> None:
-        self._mount_card(NoticeCard("Too short, skipping."))
-        self._set_state("listening")
-
-    def ready_for_key(self) -> None:
-        self._set_state("idle")
 
     def vad_speaking(self, rms: int) -> None:
         try:

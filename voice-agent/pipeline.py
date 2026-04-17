@@ -11,7 +11,7 @@ from openai import APIConnectionError
 from agents import set_tracing_disabled
 from agents.voice import AudioInput
 
-from .audio import AudioPlayer, VADRecorder, record_push_to_talk
+from .audio import AudioPlayer, VADRecorder
 from .config import Settings
 
 if TYPE_CHECKING:
@@ -72,38 +72,6 @@ async def _process_turn(
             app.api_error_with_logs(e.message, server_manager.get_all_server_logs())
         else:
             app.api_error(e.message)
-
-
-async def _run_push_to_talk(
-    settings: Settings,
-    app: VoiceAgentApp,
-    server_manager: ServerManager | None = None,
-    mcp_servers: list | None = None,
-) -> None:
-    player = AudioPlayer()
-    app.ready_banner(settings)
-
-    while not app.quit_event.is_set():
-        app.ready_for_key()
-        await app.record_key_queue.get()
-        if app.quit_event.is_set():
-            return
-
-        app.recording_start()
-        buffer = await record_push_to_talk(
-            settings, app.record_key_queue, app.quit_event
-        )
-        if app.quit_event.is_set():
-            return
-
-        if len(buffer) < settings.sample_rate * 0.5:
-            app.recording_too_short()
-            continue
-
-        app.processing(len(buffer) / settings.sample_rate)
-        async with app._switch_lock:
-            await _process_turn(buffer, app, player, settings, server_manager)
-        app.listening()
 
 
 async def _run_vad(
@@ -221,7 +189,4 @@ async def run_pipeline_loops(
     is done by the app before we get here — we just drive the main loop and
     read `app.workflow` / `app.pipeline` per turn.
     """
-    if settings.input_mode == "vad":
-        await _run_vad(settings, app, server_manager, mcp_servers)
-    else:
-        await _run_push_to_talk(settings, app, server_manager, mcp_servers)
+    await _run_vad(settings, app, server_manager, mcp_servers)

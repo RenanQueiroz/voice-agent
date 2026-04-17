@@ -16,41 +16,6 @@ if TYPE_CHECKING:
 CHANNELS = 1
 
 
-async def record_push_to_talk(
-    settings: Settings,
-    stop_queue: asyncio.Queue[None],
-    quit_event: asyncio.Event,
-) -> np.ndarray:
-    """Record from the mic until either an item lands on `stop_queue` (K pressed
-    again in the app) or `quit_event` is set (Q pressed)."""
-    chunks: list[np.ndarray] = []
-
-    stream = sd.InputStream(
-        samplerate=settings.sample_rate, channels=CHANNELS, dtype="int16"
-    )
-    stream.start()
-
-    try:
-        while not quit_event.is_set():
-            if stream.read_available > 0:
-                data, _ = stream.read(stream.read_available)
-                chunks.append(data)
-            # Let the key-queue have a chance to deliver the stop signal
-            try:
-                await asyncio.wait_for(stop_queue.get(), timeout=0.02)
-                break
-            except TimeoutError:
-                continue
-    finally:
-        stream.stop()
-        stream.close()
-
-    if not chunks:
-        return np.zeros(0, dtype=np.int16)
-    recording = np.concatenate(chunks, axis=0).flatten()
-    return np.asarray(recording, dtype=np.int16)
-
-
 def _downsample_24k_to_16k(audio: np.ndarray) -> np.ndarray:
     """Downsample 24kHz int16 audio to 16kHz for Silero VAD."""
     n = len(audio) - (len(audio) % 3)

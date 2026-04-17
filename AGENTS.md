@@ -24,8 +24,8 @@ voice-agent/
   display.py        # TurnMetrics dataclass + TYPE_CHECKING-only `Display` alias
                     #   to VoiceAgentApp (kept so other modules can annotate
                     #   without an import cycle)
-  audio.py          # VADRecorder (Silero ONNX), AudioPlayer, record_push_to_talk
-  pipeline.py       # Async loops (_run_vad, _run_push_to_talk), _process_turn,
+  audio.py          # VADRecorder (Silero ONNX), AudioPlayer
+  pipeline.py       # Async _run_vad loop, _process_turn,
                     #   run_pipeline_loops entrypoint
   providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
                     #   StreamingTTSModel, AudioPassthroughSTTModel,
@@ -39,7 +39,7 @@ voice-agent/
 
 ## Configuration files
 
-- `config.toml` — committed. Everything that isn't a model catalog: `[general]`, `[local]` server URLs, `[vad]`, `[display]`, `[audio]`, `[agent]`, `[shell]`. Catalogs moved out of here (see `models.toml`).
+- `config.toml` — committed. Everything that isn't a model catalog: `[general]`, `[local]` server URLs, `[vad]`, `[display]`, `[audio]`, `[agent]`, `[shell]`. Catalogs moved out of here (see `models.toml`). Input is always Silero VAD — push-to-talk was removed.
 - `models.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. This is what the Switch modal picks from.
 - `preferences.toml` — gitignored. Three-line file `[active]` with the active `name` per role. Written by the Switch modal. Copy from `preferences.toml.example`.
 - `.env` — gitignored. `OPENAI_API_KEY` + any env overrides.
@@ -58,7 +58,7 @@ Priority: environment variable > `.env` > `config.toml`.
 
 - composes a `VerticalScroll(#conversation)` above a docked `StatusFooter`
 - pushes a `SplashScreen` modal during initial server setup and pops it when ready
-- runs the entire pipeline (MCP connect + server reconcile + VAD/push-to-talk loop) in a single Textual worker launched from `on_mount`
+- runs the entire pipeline (MCP connect + server reconcile + VAD loop) in a single Textual worker launched from `on_mount`
 - exposes the former `Display` surface (`user_said`, `agent_start/chunk/end`, `tool_call/result`, `metrics`, `vad_*`, `processing`, `interrupted`, `server_*`, `api_error/*`, …) as methods. `providers.py`, `audio.py`, `servers.py`, and `pipeline.py` all call into these.
 
 The `Display` name in type annotations is a `TYPE_CHECKING` alias for `VoiceAgentApp` in [voice-agent/display.py](voice-agent/display.py) — keeps import cycles at bay without introducing a real subclass.
@@ -73,7 +73,6 @@ Key bindings on `VoiceAgentApp.BINDINGS` route to `action_*` methods. Buttons in
 | M         | `action_toggle_mute`   | flips `self.is_muted`                 |
 | S         | `action_open_settings` | blocked while responding              |
 | Q, Ctrl+C | `action_quit`          | sets `self.quit_event` + hard timeout |
-| K         | `action_record_key`    | pushes to `self.record_key_queue`     |
 
 ### Per-role provider model
 
@@ -139,17 +138,15 @@ Preserve `self._input_history = result.to_input_list()` and `self._current_agent
 
 ### Concurrency model
 
-VAD mode runs three concurrent tasks in `_run_vad()`:
+The pipeline runs three concurrent tasks in `_run_vad()` (the only input loop — push-to-talk was removed):
 
 1. `recorder.run(quit_event)` — continuous Silero VAD pushing segments to `recorder.segments`
 2. `mute_watcher()` — mirrors `app.is_muted` onto the recorder
 3. the main loop — consumes `recorder.segments`, spawns `_process_turn` as a cancellable task, races it against `app.interrupt_event`
 
-Push-to-talk mode is a single loop awaiting `app.record_key_queue` between start/stop presses.
-
 Key facts for the concurrency:
 
-- **No `read_key()` / cbreak anymore.** Textual owns the terminal. All keys come in via `BINDINGS` and set `app.is_muted`, `app.interrupt_event`, or push to `app.record_key_queue`.
+- **No `read_key()` / cbreak anymore.** Textual owns the terminal. All keys come in via `BINDINGS` and set `app.is_muted` or `app.interrupt_event`.
 - **Pipeline state is on the app.** `app.workflow`, `app.pipeline`, `app.server_manager`, `app.mcp_servers`, `app._switch_lock` — loops read these fresh per turn.
 - `VADRecorder.run()` must yield (`await asyncio.sleep()`) or the event loop starves the UI.
 - Any blocking I/O has to go through `run_in_executor` (`AudioPlayer.play` already does).
@@ -159,7 +156,7 @@ Key facts for the concurrency:
 The app implements ~30 methods that providers / audio / servers / pipeline call. Don't inline drawing anywhere else. The key families:
 
 - **Conversation**: `user_said`, `agent_start/chunk/end`, `tool_call`, `tool_result`, `interrupted`, `metrics`
-- **VAD / state**: `vad_speaking`, `vad_silence`, `vad_clear`, `listening`, `muted`, `unmuted`, `processing`, `recording_start`, `recording_too_short`, `ready_for_key`, `ready_banner`
+- **VAD / state**: `vad_speaking`, `vad_silence`, `vad_clear`, `listening`, `muted`, `unmuted`, `processing`, `ready_banner`
 - **Server lifecycle (drives splash)**: `server_setup_start`, `server_starting`, `server_waiting`, `server_ready_one`, `server_all_ready`, `server_failed`, `server_timeout`, `server_install*`, `server_patched`, `setup_failed`
 - **Errors (mount as inline `ErrorCard`)**: `api_error`, `api_error_with_logs`, `connection_error`, `auth_error`, `rate_limit_error`, `tts_stream_error`
 - **Tools**: `set_mcp_tools(list[str])`

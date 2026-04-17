@@ -7,7 +7,7 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 - **Mix-and-match per-role providers**: pick STT, LLM, and TTS each from a cloud or local catalog in `config.toml`. Local servers only start for the roles you actually select.
 - **Runtime model switching**: press `S` (or click *Switch models*) to open a modal picker; the active choice is saved to `preferences.toml`.
 - **Fullscreen Textual TUI**: card-per-turn conversation scrolls above a persistent status footer; clickable Mute / Interrupt / Switch / Quit buttons plus keyboard shortcuts.
-- **Voice Activity Detection (VAD)**: Silero VAD (ONNX) provides continuous listening with pre-roll; `push_to_talk` mode available as an alternative.
+- **Voice Activity Detection (VAD)**: Silero VAD (ONNX) provides continuous listening with pre-roll.
 - **Interruption**: press Space (or click Interrupt) to cut the agent off mid-response.
 - **Mute**: press M to release the mic entirely during a response.
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
@@ -86,7 +86,6 @@ Environment variables override `.env`, which overrides `config.toml`.
 
 ```toml
 [general]
-input_mode = "vad"                 # "vad" or "push_to_talk"
 enable_mcp = true                  # load MCP servers from mcp_servers.toml
 
 [local]                            # only consulted for roles whose active model is local
@@ -204,7 +203,7 @@ Each value matches the `name` field of an entry in the `config.toml` catalog (wi
 OPENAI_API_KEY=sk-...
 ```
 
-Any `config.toml` scalar can be overridden via an env var — e.g. `INPUT_MODE=push_to_talk`, `STT_URL=http://...`, `VAD_THRESHOLD=0.6`.
+Any `config.toml` scalar can be overridden via an env var — e.g. `STT_URL=http://...`, `VAD_THRESHOLD=0.6`.
 
 ### model_deps.toml
 
@@ -292,8 +291,8 @@ voice-agent/
                     #   StateRow / ModelRow / ToolsRow / ControlRow / StatusFooter /
                     #   ServerRow / SplashScreen / ModelSwitchScreen
   display.py        # TurnMetrics dataclass + TYPE_CHECKING `Display` alias
-  audio.py          # VADRecorder (Silero ONNX), AudioPlayer, record_push_to_talk
-  pipeline.py       # Async loops (_run_vad / _run_push_to_talk), _process_turn,
+  audio.py          # VADRecorder (Silero ONNX), AudioPlayer
+  pipeline.py       # Async _run_vad loop, _process_turn,
                     #   run_pipeline_loops entrypoint
   providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
                     #   StreamingTTSModel, AudioPassthroughSTTModel,

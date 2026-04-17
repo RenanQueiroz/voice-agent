@@ -161,7 +161,6 @@ class ShellConfig:
 
 @dataclass
 class Settings:
-    input_mode: Literal["push_to_talk", "vad"]
     openai_api_key: str | None
     gemini_api_key: str | None
 
@@ -434,12 +433,6 @@ def load_settings() -> Settings:
     display = t.get("display", {})
     shell_cfg = t.get("shell", {})
 
-    input_mode = _get("INPUT_MODE", general.get("input_mode"))
-    if input_mode not in ("push_to_talk", "vad"):
-        raise ConfigError(
-            f"Invalid input_mode: '{input_mode}' (must be 'push_to_talk' or 'vad')"
-        )
-
     models_toml = _load_models_toml()
     stt_models = _parse_catalog("stt", list(models_toml.get("stt", [])))
     llm_models = _parse_catalog("llm", list(models_toml.get("llm", [])))
@@ -451,7 +444,6 @@ def load_settings() -> Settings:
     active_tts = _resolve_active("tts", prefs.get("tts"), tts_models)
 
     settings = Settings(
-        input_mode=input_mode,  # type: ignore[arg-type]
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
         stt_url=_get_optional("STT_URL", local.get("stt_url")),
@@ -517,8 +509,7 @@ def load_settings() -> Settings:
                 rx = re.compile(pattern[3:], re.IGNORECASE)
             except re.error as e:
                 raise ConfigError(
-                    f"[agent.model-instructions] invalid regex "
-                    f"{pattern!r}: {e}"
+                    f"[agent.model-instructions] invalid regex {pattern!r}: {e}"
                 ) from e
             matched = any(rx.search(m) for m in active_model_names)
         else:
@@ -541,8 +532,7 @@ def _validate_active_requirements(settings: Settings) -> None:
         for m in active
     )
     needs_gemini = any(
-        m.provider == "cloud" and m.vendor == "gemini" and not m.api_key
-        for m in active
+        m.provider == "cloud" and m.vendor == "gemini" and not m.api_key for m in active
     )
     needs_local_stt = settings.stt.provider == "local"
     needs_local_llm = settings.llm.provider == "local"

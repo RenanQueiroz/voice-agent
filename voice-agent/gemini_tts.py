@@ -128,8 +128,7 @@ class GeminiTTSModel(TTSModel):
         if resp.status_code >= 400:
             _log_failure(text, voice, resp, f"HTTP {resp.status_code}")
             raise GeminiTTSError(
-                f"Gemini TTS HTTP {resp.status_code}: "
-                f"{_short_body(resp.text)}"
+                f"Gemini TTS HTTP {resp.status_code}: {_short_body(resp.text)}"
             )
 
         try:
