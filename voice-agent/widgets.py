@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
@@ -18,6 +19,33 @@ from .display import TurnMetrics
 
 if TYPE_CHECKING:
     from .config import Settings
+
+
+class CopyButton(Static):
+    """Tiny clickable 'copy' icon docked in a turn card's header.
+
+    Reads the text on every click via the callable, so a `AgentTurn` whose
+    text is still streaming will copy whatever's present at click-time."""
+
+    def __init__(self, get_text: Callable[[], str]) -> None:
+        super().__init__("⧉ copy", classes="card-copy")
+        self._get_text = get_text
+        self._copied = False
+
+    def on_click(self) -> None:
+        text = (self._get_text() or "").strip()
+        if not text:
+            return
+        self.app.copy_to_clipboard(text)
+        self._copied = True
+        self.update("✓ copied")
+        self.set_timer(1.5, self._reset_label)
+
+    def _reset_label(self) -> None:
+        if not self._copied:
+            return
+        self._copied = False
+        self.update("⧉ copy")
 
 
 # ── Turn cards ───────────────────────────────────────────
@@ -46,7 +74,9 @@ class UserTurn(Widget):
         self.set_reactive(UserTurn.stt_name, stt_name or "")
 
     def compose(self) -> ComposeResult:
-        yield Static("You", classes="label")
+        with Horizontal(classes="card-header"):
+            yield Static("You", classes="label")
+            yield CopyButton(lambda: self.text)
         yield Static("", id="body")
         yield Static("", classes="stt")
 
@@ -98,7 +128,9 @@ class AgentTurn(Widget):
         self._body_ready = False
 
     def compose(self) -> ComposeResult:
-        yield Static("Agent", classes="label")
+        with Horizontal(classes="card-header"):
+            yield Static("Agent", classes="label")
+            yield CopyButton(lambda: self.text)
         yield Static("", id="body")
         yield Static("", classes="metrics")
 
@@ -361,14 +393,15 @@ class ToolsRow(Widget):
 
 
 class ControlRow(Horizontal):
-    """Footer control row: clickable Mute / Interrupt / Switch / Quit buttons."""
+    """Footer control row: clickable Mute / Interrupt / Reset / Settings / Quit."""
 
     def compose(self) -> ComposeResult:
         yield Button("Mute (M)", id="btn-mute", variant="default")
         yield Button(
             "Interrupt (Space)", id="btn-interrupt", variant="warning", disabled=True
         )
-        yield Button("Switch (S)", id="btn-switch", variant="default")
+        yield Button("Reset (R)", id="btn-reset", variant="default")
+        yield Button("Settings (S)", id="btn-settings", variant="default")
         yield Button("Quit (Q)", id="btn-quit", variant="error")
 
 
@@ -510,7 +543,7 @@ class SplashScreen(ModalScreen[None]):
 # ── Model switch modal ───────────────────────────────────
 
 
-class ModelSwitchScreen(ModalScreen[tuple[str, str, str] | None]):
+class SettingsScreen(ModalScreen[tuple[str, str, str] | None]):
     """Modal with three Select dropdowns (STT / LLM / TTS) + Apply/Cancel."""
 
     BINDINGS = [
@@ -523,44 +556,44 @@ class ModelSwitchScreen(ModalScreen[tuple[str, str, str] | None]):
 
     def compose(self) -> ComposeResult:
         s = self._settings
-        with Container(id="switch-panel"):
-            yield Label("Switch models", id="switch-title")
-            with Vertical(id="switch-rows"):
-                yield Label("STT", classes="switch-label")
+        with Container(id="settings-panel"):
+            yield Label("Settings", id="settings-title")
+            with Vertical(id="settings-rows"):
+                yield Label("STT", classes="settings-label")
                 yield Select(
                     options=[(m.display_name, m.name) for m in s.stt_models],
                     value=s.active_stt,
-                    id="switch-stt",
+                    id="settings-stt",
                     allow_blank=False,
                 )
-                yield Label("LLM", classes="switch-label")
+                yield Label("LLM", classes="settings-label")
                 yield Select(
                     options=[(m.display_name, m.name) for m in s.llm_models],
                     value=s.active_llm,
-                    id="switch-llm",
+                    id="settings-llm",
                     allow_blank=False,
                 )
-                yield Label("TTS", classes="switch-label")
+                yield Label("TTS", classes="settings-label")
                 yield Select(
                     options=[(m.display_name, m.name) for m in s.tts_models],
                     value=s.active_tts,
-                    id="switch-tts",
+                    id="settings-tts",
                     allow_blank=False,
                 )
-            with Horizontal(id="switch-buttons"):
-                yield Button("Apply", id="switch-apply", variant="primary")
-                yield Button("Cancel", id="switch-cancel")
+            with Horizontal(id="settings-buttons"):
+                yield Button("Apply", id="settings-apply", variant="primary")
+                yield Button("Cancel", id="settings-cancel")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "switch-cancel":
+        if event.button.id == "settings-cancel":
             self.dismiss(None)
             return
-        if event.button.id == "switch-apply":
-            stt = self.query_one("#switch-stt", Select).value
-            llm = self.query_one("#switch-llm", Select).value
-            tts = self.query_one("#switch-tts", Select).value
+        if event.button.id == "settings-apply":
+            stt = self.query_one("#settings-stt", Select).value
+            llm = self.query_one("#settings-llm", Select).value
+            tts = self.query_one("#settings-tts", Select).value
             if isinstance(stt, str) and isinstance(llm, str) and isinstance(tts, str):
                 self.dismiss((stt, llm, tts))

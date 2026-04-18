@@ -26,8 +26,8 @@ from .widgets import (
     ApprovalCard,
     ErrorCard,
     ModelRow,
-    ModelSwitchScreen,
     NoticeCard,
+    SettingsScreen,
     SplashScreen,
     StateRow,
     StatusFooter,
@@ -57,7 +57,8 @@ class VoiceAgentApp(App[None]):
         Binding("m", "toggle_mute", "Mute", show=False),
         Binding("q", "quit", "Quit", show=False),
         Binding("ctrl+c", "quit", "Quit", show=False, priority=True),
-        Binding("s", "open_settings", "Switch models", show=False),
+        Binding("s", "open_settings", "Settings", show=False),
+        Binding("r", "reset_conversation", "Reset", show=False),
         Binding("y", "approve", "Approve", show=False),
         Binding("n", "decline", "Decline", show=False),
     ]
@@ -292,7 +293,7 @@ class VoiceAgentApp(App[None]):
                 name="switch",
             )
 
-        self.push_screen(ModelSwitchScreen(self.settings), _apply)
+        self.push_screen(SettingsScreen(self.settings), _apply)
 
     async def switch_models(self, stt: str, llm: str, tts: str) -> None:
         """Apply a new set of active models: reconcile servers, rebuild pipeline."""
@@ -372,10 +373,52 @@ class VoiceAgentApp(App[None]):
             self.action_toggle_mute()
         elif event.button.id == "btn-interrupt":
             self.action_interrupt()
-        elif event.button.id == "btn-switch":
+        elif event.button.id == "btn-reset":
+            self.action_reset_conversation()
+        elif event.button.id == "btn-settings":
             self.action_open_settings()
         elif event.button.id == "btn-quit":
             self.run_worker(self.action_quit())
+
+    def action_reset_conversation(self) -> None:
+        """Clear the chat history and all conversation cards."""
+        if self.responding:
+            self._mount_card(
+                NoticeCard("Can't reset while the agent is responding.")
+            )
+            return
+        self.run_worker(self._reset_conversation(), exclusive=False, name="reset")
+
+    async def _reset_conversation(self) -> None:
+        """Rebuild the pipeline (fresh workflow ⇒ empty history) and clear cards.
+
+        We rebuild the pipeline rather than poking at `workflow._input_history`
+        directly so a future change to the workflow's internals doesn't leave
+        the reset subtly broken. The server reconcile is skipped — the active
+        models haven't changed — so this is cheap.
+        """
+        from .providers import create_pipeline
+
+        async with self._switch_lock:
+            try:
+                self.workflow, self.pipeline = create_pipeline(
+                    self.settings, self, mcp_servers=self.mcp_servers
+                )
+            except Exception as e:
+                self._mount_error("Reset failed", str(e))
+                return
+            try:
+                convo = self._conversation()
+                for child in list(convo.children):
+                    child.remove()
+            except Exception:
+                pass
+            self._current_agent_turn = None
+            self._current_tool_card = None
+            self._pending_user_turn = None
+            self._last_metrics = None
+            self._mount_card(NoticeCard("Conversation reset."))
+            self._set_state("listening")
 
     # ── Conversation output ───────────────────────────────
 

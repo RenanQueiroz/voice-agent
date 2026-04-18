@@ -66,11 +66,12 @@ model    = "gpt-5.4-mini"
 # the default is `medium`, which makes TTFT unacceptable for voice. Accepts:
 # "none" | "minimal" | "low" | "medium" | "high" | "xhigh". Bump this up if
 # you want the model to think harder on complex prompts.
-reasoning_effort = "minimal"
+reasoning_effort = "none"
 # OpenAI-hosted tools. Allowed: "web_search", "code_interpreter", "file_search".
 # Only valid on OpenAI cloud LLMs — i.e. `provider = "cloud"` with either no
 # `vendor` field or `vendor = "openai"`. They do NOT work with Gemini or any
 # other vendor (the app rejects this at startup). Leave empty to disable.
+# These cannot be used with thinking level set to "minimal".
 hosted_tools = ["web_search", "code_interpreter"]
 # For hosted_tools = ["file_search", ...], add:
 #   file_search_vector_stores = ["vs_abc123"]
@@ -101,6 +102,11 @@ voice    = "af_heart"
 name     = "chatterbox-turbo"
 provider = "local"
 model    = "mlx-community/chatterbox-turbo-4bit"
+
+[[tts]]
+name     = "csm"
+provider = "local"
+model    = "mlx-community/csm-1b-8bit"
 
 [[tts]]
 name     = "gpt-4o-mini-tts"

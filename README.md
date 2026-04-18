@@ -4,16 +4,21 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 
 ## Features
 
-- **Mix-and-match per-role providers**: pick STT, LLM, and TTS each from a cloud or local catalog in `config.toml`. Local servers only start for the roles you actually select.
-- **Runtime model switching**: press `S` (or click *Switch models*) to open a modal picker; the active choice is saved to `preferences.toml`.
-- **Fullscreen Textual TUI**: card-per-turn conversation scrolls above a persistent status footer; clickable Mute / Interrupt / Switch / Quit buttons plus keyboard shortcuts.
+- **Mix-and-match per-role providers**: pick STT, LLM, and TTS each from a cloud or local catalog in `models.toml`. Cloud LLMs / TTS can be OpenAI or Gemini. Local servers only start for the roles you actually select.
+- **Runtime model switching**: press `S` (or click *Settings*) to open a modal picker; the active choice is saved to `preferences.toml`.
+- **Per-model API key override**: use `api_key = "${VAR_NAME}"` on a cloud entry to point it at a different vendor key (e.g. a legacy Gemini key for the LLM while the newer key handles TTS).
+- **Reasoning-effort knob**: `reasoning_effort = "minimal"` on a GPT-5 or Gemini-3 entry skips server-side thinking and drops TTFT from ~16s to ~1s for voice.
+- **Fullscreen Textual TUI**: card-per-turn conversation scrolls above a persistent status footer; clickable Mute / Interrupt / Reset / Settings / Quit buttons plus keyboard shortcuts.
+- **Per-card copy button**: a small `⧉ copy` control on every user and agent card pushes the message to the system clipboard (OSC-52).
+- **Reset conversation**: press `R` (or click *Reset*) to clear history and start fresh without restarting the app.
 - **Voice Activity Detection (VAD)**: Silero VAD (ONNX) provides continuous listening with pre-roll.
 - **Interruption**: press Space (or click Interrupt) to cut the agent off mid-response.
 - **Mute**: press M to release the mic entirely during a response.
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
-- **OpenAI-hosted tools**: cloud LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `config.toml`.
+- **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
+- **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
 - **Auto-setup for local roles**: installs Python deps, brew deps, builds whisper.cpp, downloads the LLM binary, and patches known compatibility issues.
-- **Per-turn metrics**: STT, LLM, TTS, and total timing inline with each turn.
+- **Per-turn metrics**: STT, LLM (with TTFT), TTS, and total timing inline with each turn.
 
 ## Prerequisites
 
@@ -39,33 +44,30 @@ uv sync --extra local
 uv run python -m voice-agent
 ```
 
-If any of your active models are cloud, add your API key to `.env`:
+Add the keys you need to `.env`:
 
 ```
 OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...       # only if any active model is a Gemini entry
 ```
+
+Per-model override: any cloud entry can set `api_key = "${VAR_NAME}"` in `models.toml` to pull from a different env var, so you can have (say) two Gemini keys live side-by-side.
 
 ## Controls
 
-All controls are also clickable buttons in the bottom footer. The Interrupt button only appears while the agent is responding.
+All controls are also clickable buttons in the bottom footer. The Interrupt button is enabled only while the agent is responding. Input is Silero VAD — speak and the app picks it up automatically.
 
-### VAD mode
+| Key       | Action                                                       |
+|-----------|--------------------------------------------------------------|
+| (speak)   | Speech is detected automatically (Silero VAD)                |
+| Space     | Interrupt the agent while it's speaking                      |
+| M         | Toggle microphone mute                                       |
+| R         | Reset conversation (clear history + cards; fresh workflow)   |
+| S         | Open the Settings modal (per-role model picker)              |
+| Y / N     | Approve / decline a pending shell-tool proposal              |
+| Q, Ctrl+C | Quit                                                         |
 
-| Key     | Action                                           |
-|---------|--------------------------------------------------|
-| (speak) | Speech is detected automatically (Silero VAD)    |
-| Space   | Interrupt the agent while it's speaking          |
-| M       | Toggle microphone mute                           |
-| S       | Open the Switch-models modal                     |
-| Q       | Quit                                             |
-
-### Push-to-talk mode
-
-| Key | Action                          |
-|-----|---------------------------------|
-| K   | Start / stop recording          |
-| S   | Open the Switch-models modal    |
-| Q   | Quit                            |
+Each user and agent card has a `⧉ copy` control in the top-right that copies the message text to your clipboard (via OSC-52).
 
 ## Configuration
 
@@ -75,8 +77,8 @@ Config lives in three files at the project root:
 |-------------------------|---------------------------------------------------------------------------------|-------------|
 | `config.toml`           | Local server URLs, VAD, agent, display, audio, shell tool                       | ✅          |
 | `models.toml`           | `[[stt]]` / `[[llm]]` / `[[tts]]` catalogs — the pickable models per role       | ✅          |
-| `preferences.toml`      | Active model name per role; auto-written by the Switch modal                    | ❌          |
-| `.env`                  | Secrets (`OPENAI_API_KEY`)                                                      | ❌          |
+| `preferences.toml`      | Active model name per role; auto-written by the Settings modal                  | ❌          |
+| `.env`                  | Secrets (`OPENAI_API_KEY`, `GEMINI_API_KEY`, any `api_key = "${VAR}"` targets)  | ❌          |
 | `mcp_servers.toml`      | MCP server definitions                                                          | ❌          |
 | `llamacpp-models.ini`   | llama-server preset (only when any LLM uses `server = "llamacpp"`)              | ❌          |
 
@@ -151,14 +153,26 @@ kv_bits         = 3.5                   # mlx-vlm only
 kv_quant_scheme = "turboquant"          # mlx-vlm only
 
 [[llm]]
-name     = "gpt-5.4-mini"
-provider = "cloud"
-model    = "gpt-5.4-mini"
-# Opt into OpenAI-hosted tools (cloud LLMs only):
+name             = "gpt-5.4-mini"
+provider         = "cloud"
+model            = "gpt-5.4-mini"
+reasoning_effort = "minimal"            # "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+# Opt into OpenAI-hosted tools (OpenAI cloud LLMs only — not Gemini):
 # hosted_tools = ["web_search", "code_interpreter"]
 # With "file_search" you must also set:
 # file_search_vector_stores = ["vs_abc123"]
 # file_search_max_results   = 5
+
+# Gemini LLM via its OpenAI-compatible chat endpoint.
+[[llm]]
+name             = "gemini-3.1-flash-lite-preview"
+provider         = "cloud"
+vendor           = "gemini"             # default is "openai"; set "gemini" to route to Google
+model            = "gemini-3.1-flash-lite-preview"
+reasoning_effort = "minimal"            # otherwise TTFT is ~16s on Gemini 3 preview
+# Per-model key override. The OpenAI-compat endpoint rejects newer "AQ."-prefix
+# keys, so point the LLM at a legacy AIza-prefix key:
+api_key          = "${GEMINI_API_KEY_LEGACY}"
 
 # ── TTS catalog ─────────────────────────────────────
 [[tts]]
@@ -172,7 +186,19 @@ name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
 voice    = "alloy"
+
+# Gemini TTS via native generateContent API (custom adapter in gemini_tts.py).
+[[tts]]
+name     = "gemini-3.1-flash-tts-preview"
+provider = "cloud"
+vendor   = "gemini"
+model    = "gemini-3.1-flash-tts-preview"
+voice    = "Sulafat"                    # see https://ai.google.dev/gemini-api/docs/speech-generation#voices
 ```
+
+**Per-model `api_key` override.** Any cloud entry can set `api_key = "${VAR_NAME}"` to pull from a specific env var, overriding the vendor-wide `OPENAI_API_KEY` / `GEMINI_API_KEY`. Use this when one key is rate-limited or scoped to a subset of models. Literal values work but are checked in — prefer env-var references.
+
+**`reasoning_effort` on reasoning-capable LLMs.** Gemini 3 preview flash and GPT-5 models do server-side thinking before emitting tokens; the default (typically `medium`) makes first-token latency unacceptable for voice. `"minimal"` drops it to ~1s. Hosted OpenAI tools require at least `"low"`, since the tool calls are themselves part of the reasoning process.
 
 #### Runtime variables in `[agent].instructions`
 
@@ -186,7 +212,7 @@ voice    = "alloy"
 
 ### preferences.toml
 
-Three lines, gitignored, written by the Switch modal (or you can create it manually):
+Three lines, gitignored, written by the Settings modal (or you can create it manually):
 
 ```toml
 [active]
@@ -217,13 +243,13 @@ brew = ["espeak-ng"]
 
 ## Runtime model switching
 
-Press `S` (or click the **Switch models** button) to open the modal. Pick one model per role and press *Apply*:
+Press `S` (or click the **Settings** button) to open the modal. Pick one model per role and press *Apply*:
 
-1. `ServerManager.reconcile()` stops any local server no longer needed, starts ones that are now needed, and restarts any whose active model changed.
-2. The workflow + pipeline are rebuilt (fresh history — the previous conversation is not carried across a swap).
-3. `preferences.toml` is rewritten with the new selection.
+1. `preferences.toml` is rewritten immediately with the new selection (so a crash mid-swap doesn't desync it).
+2. `ServerManager.reconcile()` stops any local server no longer needed, starts ones that are now needed, and restarts any whose active model changed.
+3. The workflow + pipeline are rebuilt (fresh history — the previous conversation is not carried across a swap; use **Reset (R)** for the same effect without switching models).
 
-If a server fails to start, the active selection is reverted and an inline error card is mounted.
+If a server fails to start, the active selection is reverted, `preferences.toml` is rewritten with the previous selection, and an inline error card is mounted.
 
 ## MCP servers (tools)
 
@@ -254,19 +280,22 @@ enabled = false
 
 Use `${VAR_NAME}` in any string value to pull secrets from `.env`. Tool calls and their results are rendered as cards in the conversation transcript.
 
-## OpenAI-hosted tools (cloud LLMs)
+## OpenAI-hosted tools (OpenAI cloud LLMs only)
 
-Any cloud LLM entry can enable [hosted tools](https://openai.github.io/openai-agents-python/tools/):
+Cloud LLM entries with vendor `openai` (the default) can enable [hosted tools](https://openai.github.io/openai-agents-python/tools/):
 
 ```toml
 [[llm]]
-name         = "gpt-5.4-mini"
-provider     = "cloud"
-model        = "gpt-5.4-mini"
-hosted_tools = ["web_search", "code_interpreter"]
+name             = "gpt-5.4-mini"
+provider         = "cloud"
+model            = "gpt-5.4-mini"
+reasoning_effort = "low"             # hosted tools need ≥ "low"; "minimal"/"none" is rejected
+hosted_tools     = ["web_search", "code_interpreter"]
 ```
 
-Supported tools: `web_search`, `code_interpreter`, `file_search` (requires `file_search_vector_stores = [...]` and optional `file_search_max_results = N`). The app rejects `hosted_tools` on local LLMs at startup.
+Supported tools: `web_search`, `code_interpreter`, `file_search` (requires `file_search_vector_stores = [...]` and optional `file_search_max_results = N`). The app rejects `hosted_tools` on local LLMs and on non-OpenAI vendors (Gemini) at startup.
+
+Hosted tools go through the OpenAI Responses API, which is why the OpenAI LLM path explicitly uses `OpenAIResponsesModel` (not `OpenAIChatCompletionsModel`).
 
 ## Architecture
 
@@ -285,11 +314,13 @@ voice-agent/
   __init__.py
   __main__.py       # Entry point; just launches VoiceAgentApp
   app.py            # Textual App: pipeline worker, display methods,
-                    #   action_open_settings, switch_models, …
-  app.tcss          # Textual CSS (cards, footer, splash, switch modal)
-  widgets.py        # UserTurn / AgentTurn / ToolCard / NoticeCard / ErrorCard /
-                    #   StateRow / ModelRow / ToolsRow / ControlRow / StatusFooter /
-                    #   ServerRow / SplashScreen / ModelSwitchScreen
+                    #   action_open_settings, switch_models,
+                    #   action_reset_conversation, …
+  app.tcss          # Textual CSS (cards, footer, splash, settings modal)
+  widgets.py        # UserTurn / AgentTurn / CopyButton / ToolCard / NoticeCard /
+                    #   ErrorCard / ApprovalCard / StateRow / ModelRow / ToolsRow /
+                    #   ControlRow / StatusFooter / ServerRow / SplashScreen /
+                    #   SettingsScreen
   display.py        # TurnMetrics dataclass + TYPE_CHECKING `Display` alias
   audio.py          # VADRecorder (Silero ONNX), AudioPlayer
   pipeline.py       # Async _run_vad loop, _process_turn,
@@ -297,6 +328,8 @@ voice-agent/
   providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
                     #   StreamingTTSModel, AudioPassthroughSTTModel,
                     #   create_agent / create_pipeline, _hosted_tools
+  gemini_tts.py     # GeminiTTSModel (native generateContent, not OpenAI-compat)
+  shell.py          # Shell tool + approval flow
   servers.py        # ServerManager.reconcile() per-role starter
   mcp.py            # load_mcp_servers() with ${ENV} expansion + `enabled` toggle
   preferences.py    # load/save preferences.toml
@@ -305,8 +338,10 @@ voice-agent/
 
 ### Key design decisions
 
-- **Per-role providers, not a single mode.** Each `[[stt]] / [[llm]] / [[tts]]` entry marks itself `provider = "cloud" | "local"`. The `ServerManager` is a reconciler: it starts only the local server(s) needed by the currently active selection and restarts on a swap.
+- **Per-role providers, not a single mode.** Each `[[stt]] / [[llm]] / [[tts]]` entry marks itself `provider = "cloud" | "local"` (cloud entries can also set `vendor = "gemini"`). The `ServerManager` is a reconciler: it starts only the local server(s) needed by the currently active selection and restarts on a swap.
 - **OpenAI-compatible local servers.** mlx-audio, mlx-vlm, mlx-lm, and llama-server all expose `/v1/...` endpoints, so we reuse the SDK's `OpenAITTSModel` / `OpenAIChatCompletionsModel` and point `AsyncOpenAI` at localhost. Local STT uses a custom `WhisperCppSTTModel` hitting whisper-server's `/inference`.
+- **OpenAI LLMs use Responses, not Chat Completions.** To support hosted tools the OpenAI cloud LLM path constructs `OpenAIResponsesModel` with an explicit base URL + `Omit()` headers — this dodges env vars like `OPENAI_BASE_URL` / `OPENAI_ORG_ID` that would otherwise redirect traffic or trigger Gemini's "Multiple authentication credentials received" 400.
+- **Gemini integration is split across two paths.** LLM goes through Gemini's OpenAI-compatible endpoint (we reuse `OpenAIChatCompletionsModel` with a different base URL). TTS does not have an OpenAI-compat counterpart, so `gemini_tts.py` wraps the native `generateContent` API and exposes it as a `TTSModel`.
 - **Flicker-free streaming.** Each turn is its own widget; agent text is a `reactive` attribute that re-renders only that one widget per token. Rich `Live` is gone; Textual owns the screen.
 - **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped.
 - **Echo suppression by mic muting.** There is no AEC — we mute the microphone while the agent is speaking. Press Space to interrupt instead of speaking over it.

@@ -18,11 +18,34 @@ UserTurn, AgentTurn, ToolCard, ErrorCard {
     padding: 0 1;
 }
 
+.card-header {
+    height: 1;
+    width: 100%;
+}
+
+.card-header > .label {
+    width: 1fr;
+}
+
+CopyButton {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    text-style: dim;
+}
+
+CopyButton:hover {
+    color: $accent;
+    text-style: bold;
+    background: $boost;
+}
+
 UserTurn {
     border: round $primary-lighten-1;
 }
 
-UserTurn > .label {
+UserTurn .label {
     color: $primary-lighten-3;
     text-style: bold;
 }
@@ -30,13 +53,14 @@ UserTurn > .label {
 UserTurn > .stt {
     color: $text-muted;
     text-style: dim;
+    margin-top: 1;
 }
 
 AgentTurn {
     border: round $accent;
 }
 
-AgentTurn > .label {
+AgentTurn .label {
     color: $accent-lighten-2;
     text-style: bold;
 }
@@ -50,6 +74,7 @@ AgentTurn > #body {
 AgentTurn > .metrics {
     color: $text-muted;
     text-style: dim;
+    margin-top: 1;
 }
 
 AgentTurn.-interrupted > #body {
@@ -207,14 +232,14 @@ SplashScreen {
     width: 100%;
 }
 
-/* ── Switch modal ─────────────────────────────────────── */
+/* ── Settings modal ───────────────────────────────────── */
 
-ModelSwitchScreen {
+SettingsScreen {
     align: center middle;
     background: $surface 60%;
 }
 
-#switch-panel {
+#settings-panel {
     width: 80%;             /* scale with the terminal */
     max-width: 80;          /* but cap so it doesn't look stretched */
     min-width: 36;
@@ -225,36 +250,36 @@ ModelSwitchScreen {
     background: $panel;
 }
 
-#switch-title {
+#settings-title {
     width: 100%;
     content-align: center middle;
     color: $accent;
     text-style: bold;
 }
 
-#switch-rows {
+#settings-rows {
     height: auto;
 }
 
-.switch-label {
+.settings-label {
     width: 100%;
     color: $text-muted;
     text-style: dim;
     margin-top: 1;          /* vertical gap between each role block */
 }
 
-#switch-rows > Select {
+#settings-rows > Select {
     width: 100%;
 }
 
-#switch-buttons {
+#settings-buttons {
     height: auto;
     width: 100%;
     align-horizontal: center;
     margin-top: 2;          /* clear visual gap above the action buttons */
 }
 
-#switch-buttons > Button {
+#settings-buttons > Button {
     width: 1fr;             /* share available width equally */
     min-width: 1;           /* allow shrinking on narrow terminals */
     max-width: 20;          /* cap on wide terminals */
