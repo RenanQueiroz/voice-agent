@@ -53,17 +53,64 @@ if TYPE_CHECKING:
 
 
 class StreamingTTSModel(OpenAITTSModel):
-    """TTS model that requests server-side streaming from mlx-audio."""
+    """TTS model that requests server-side streaming from mlx-audio.
+
+    Optionally carries `ref_audio` / `ref_text` for models that support voice
+    cloning (e.g. CSM). mlx-audio expects both as strings in the JSON body —
+    `ref_audio` is a filesystem path the server can read, not an upload.
+
+    `streaming_interval` overrides mlx-audio's buffering window. We default
+    to the server's own 2.0s — shorter values seem plausible on paper but in
+    practice caused stuttering/underruns and glitchy audio, so opting into a
+    lower value is per-TTS-entry.
+    """
+
+    _DEFAULT_STREAMING_INTERVAL = 2.0
+
+    def __init__(
+        self,
+        model: str,
+        openai_client: AsyncOpenAI,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
+        streaming_interval: float | None = None,
+        instruct: str | None = None,
+        temperature: float | None = None,
+    ):
+        super().__init__(model=model, openai_client=openai_client)
+        self._ref_audio = ref_audio
+        self._ref_text = ref_text
+        self._instruct = instruct
+        self._temperature = temperature
+        self._streaming_interval = (
+            streaming_interval
+            if streaming_interval is not None
+            else self._DEFAULT_STREAMING_INTERVAL
+        )
 
     async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        # Some TTS tokenizers (notably CSM) choke on the Unicode "right single
+        # quotation mark" (U+2019) that LLMs commonly emit for apostrophes —
+        # the audio skips or mispronounces the word. Normalize to ASCII; it's
+        # a lossless swap phonetically.
+        text = text.replace("\u2019", "'")
+        extra_body: dict[str, object] = {
+            "stream": True,
+            "streaming_interval": self._streaming_interval,
+        }
+        if self._ref_audio and self._ref_text:
+            extra_body["ref_audio"] = self._ref_audio
+            extra_body["ref_text"] = self._ref_text
+        if self._instruct:
+            extra_body["instruct"] = self._instruct
+        if self._temperature is not None:
+            extra_body["temperature"] = self._temperature
         response = self._client.audio.speech.with_streaming_response.create(
             model=self.model,
             voice=settings.voice or "default",
             input=text,
             response_format="pcm",
-            extra_body={
-                "stream": True,
-            },
+            extra_body=extra_body,
         )
         async with response as stream:
             async for chunk in stream.iter_bytes(chunk_size=1024):
@@ -627,6 +674,11 @@ def create_pipeline(
         tts_model = StreamingTTSModel(
             model=tts.model,
             openai_client=tts_client,
+            ref_audio=tts.ref_audio,
+            ref_text=tts.ref_text,
+            streaming_interval=tts.streaming_interval,
+            instruct=tts.instruct,
+            temperature=tts.temperature,
         )
     elif tts.vendor == "gemini":
         from .gemini_tts import GeminiTTSModel

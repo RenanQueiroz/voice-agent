@@ -153,6 +153,12 @@ class ServerManager:
             "0.0.0.0",
             "--port",
             str(port),
+            # --workers accepts either an int (exact worker count) or a
+            # 0 < float <= 1 (fraction of cores). mlx-audio defaults to 2
+            # workers, which leaves most cores idle on Apple Silicon.
+            # 1.0 = all cores — max throughput for local TTS.
+            "--workers",
+            "0.5",
         ]
         return self._launch("tts", cmd, f"mlx-audio (port {port})")
 

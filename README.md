@@ -14,6 +14,7 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 - **Voice Activity Detection (VAD)**: Silero VAD (ONNX) provides continuous listening with pre-roll.
 - **Interruption**: press Space (or click Interrupt) to cut the agent off mid-response.
 - **Mute**: press M to release the mic entirely during a response.
+- **Voice cloning** on local TTS models that support it (e.g. CSM): provide a reference WAV + transcript on a TTS entry and mlx-audio will clone that voice.
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
@@ -181,6 +182,15 @@ provider = "local"
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
 
+# Voice cloning with CSM (local only). Both fields required together.
+# `ref_audio` is resolved relative to the project root.
+[[tts]]
+name      = "csm-my-voice"
+provider  = "local"
+model     = "mlx-community/csm-1b-8bit"
+ref_audio = "voices/my-voice.wav"
+ref_text  = "This is what my voice sounds like."
+
 [[tts]]
 name     = "gpt-4o-mini-tts"
 provider = "cloud"
@@ -199,6 +209,8 @@ voice    = "Sulafat"                    # see https://ai.google.dev/gemini-api/d
 **Per-model `api_key` override.** Any cloud entry can set `api_key = "${VAR_NAME}"` to pull from a specific env var, overriding the vendor-wide `OPENAI_API_KEY` / `GEMINI_API_KEY`. Use this when one key is rate-limited or scoped to a subset of models. Literal values work but are checked in — prefer env-var references.
 
 **`reasoning_effort` on reasoning-capable LLMs.** Gemini 3 preview flash and GPT-5 models do server-side thinking before emitting tokens; the default (typically `medium`) makes first-token latency unacceptable for voice. `"minimal"` drops it to ~1s. Hosted OpenAI tools require at least `"low"`, since the tool calls are themselves part of the reasoning process.
+
+**Voice cloning on local TTS entries.** Set `ref_audio` + `ref_text` to clone a voice with models that support it (CSM is the current flagship; `mlx-community/csm-1b-8bit`). `ref_audio` is a path to a short reference WAV (resolved relative to the project root); `ref_text` is its verbatim transcript. Both must be set together, and only on local TTS entries — mlx-audio handles the cloning server-side. The config loader checks at startup that the file exists.
 
 #### Runtime variables in `[agent].instructions`
 

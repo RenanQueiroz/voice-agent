@@ -122,6 +122,31 @@ class ModelConfig:
     # TTS-only
     voice: str | None = None
 
+    # Local-TTS-only: voice cloning for models that support it (e.g. CSM).
+    # `ref_audio` is a path to a short reference recording; `ref_text` is its
+    # transcript. Both are sent to mlx-audio's `/v1/audio/speech` as-is. Paths
+    # get resolved to absolute relative to the project root, so the spawned
+    # mlx-audio server can find the file regardless of its cwd.
+    ref_audio: str | None = None
+    ref_text: str | None = None
+
+    # Local-TTS-only: seconds of audio mlx-audio buffers before emitting each
+    # streaming chunk. Lower = earlier first-byte (good on paper) but in
+    # practice <2.0 caused stuttering for us, so providers.py defaults to
+    # the server's own 2.0. Override per-entry if you want to try lower.
+    streaming_interval: float | None = None
+
+    # Local-TTS-only: free-form style/emotion instruction. Some mlx-audio
+    # models (e.g. Qwen3-TTS) accept an `instruct` string in the request
+    # body to steer pronunciation, tone, pacing, etc. Ignored by models
+    # that don't support it.
+    instruct: str | None = None
+
+    # Local-TTS-only: sampling temperature. Lower = more deterministic /
+    # consistent speech, higher = more variation. mlx-audio's server default
+    # is 0.7; modify this value if the voice feels inconsistent between turns.
+    temperature: float | None = None
+
     # Local-LLM-only
     server: LLMServer | None = None
     preset: str | None = (
@@ -318,6 +343,93 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                     f"[[tts]] '{name}' has a non-string 'voice': {voice!r}"
                 )
             config.voice = voice
+
+            ref_audio = entry.get("ref_audio")
+            ref_text = entry.get("ref_text")
+            if ref_audio is not None or ref_text is not None:
+                if provider != "local":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has ref_audio/ref_text but provider "
+                        f"= {provider!r}. Voice cloning is a local-server "
+                        "feature (mlx-audio)."
+                    )
+                if not (ref_audio and ref_text):
+                    raise ConfigError(
+                        f"[[tts]] '{name}' needs both 'ref_audio' and "
+                        "'ref_text' set — they're a pair (reference audio + "
+                        "its transcript)."
+                    )
+                if not isinstance(ref_audio, str) or not isinstance(ref_text, str):
+                    raise ConfigError(
+                        f"[[tts]] '{name}' ref_audio and ref_text must both be strings."
+                    )
+                ref_path = Path(ref_audio)
+                if not ref_path.is_absolute():
+                    ref_path = (_PROJECT_ROOT / ref_audio).resolve()
+                if not ref_path.exists():
+                    raise ConfigError(
+                        f"[[tts]] '{name}' ref_audio file not found: "
+                        f"{ref_path}. Path is resolved relative to the "
+                        "project root."
+                    )
+                config.ref_audio = str(ref_path)
+                config.ref_text = ref_text
+
+            interval = entry.get("streaming_interval")
+            if interval is not None:
+                if provider != "local":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has streaming_interval but "
+                        f"provider = {provider!r}. Only mlx-audio (local) "
+                        "honors this parameter."
+                    )
+                try:
+                    config.streaming_interval = float(interval)
+                except (TypeError, ValueError) as e:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' streaming_interval must be a "
+                        f"number, got {interval!r}"
+                    ) from e
+                if config.streaming_interval <= 0:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' streaming_interval must be > 0, "
+                        f"got {config.streaming_interval}"
+                    )
+
+            instruct = entry.get("instruct")
+            if instruct is not None:
+                if provider != "local":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has instruct but provider = "
+                        f"{provider!r}. Only mlx-audio (local) honors this "
+                        "parameter."
+                    )
+                if not isinstance(instruct, str):
+                    raise ConfigError(
+                        f"[[tts]] '{name}' instruct must be a string, got {instruct!r}"
+                    )
+                config.instruct = instruct
+
+            temperature = entry.get("temperature")
+            if temperature is not None:
+                if provider != "local":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has temperature but provider = "
+                        f"{provider!r}. Only mlx-audio (local) honors this "
+                        "parameter."
+                    )
+                try:
+                    config.temperature = float(temperature)
+                except (TypeError, ValueError) as e:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' temperature must be a number, "
+                        f"got {temperature!r}"
+                    ) from e
+                if config.temperature < 0:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' temperature must be >= 0, got "
+                        f"{config.temperature}"
+                    )
 
         if role == "llm":
             effort = entry.get("reasoning_effort")
