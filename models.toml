@@ -92,12 +92,36 @@ reasoning_effort = "minimal"
 api_key  = "${GEMINI_API_KEY_LEGACY}"
 
 # ── TTS catalog ───────────────────────────────────────────
-# Local TTS entries also accept:
-# `streaming_interval` (seconds) — the window mlx-audio buffers before emitting each audio chunk. 
-# Defaults to 2.0 (the server's own default); lower values shorten first-byte latency but tend to
-# cause glitchy audio in practice. Override per-entry if you want to try it.
-# `temperature` (0.0-1.0) — tames the sampler. 
-# Lower = more consistent voice across turns, higher = more variation (server default is 0.7).
+#
+# Shared options (apply to any TTS entry unless noted):
+#
+# `split` — how we chunk the streamed LLM output before sending to TTS.
+#   "sentence" (default) — flush on each sentence boundary. Lowest
+#                          first-audio latency; highest TTS request count.
+#                          Good for local models and OpenAI.
+#   "paragraph"          — flush on blank lines. Fewer requests per turn;
+#                          some extra latency waiting for the paragraph to
+#                          close. Good for rate-limited cloud TTS like Gemini.
+#   "full"               — don't split; one TTS request per turn, sent after
+#                          the LLM finishes. Highest first-audio latency but
+#                          minimum quota usage.
+#
+# Local-TTS-only options:
+#
+# `streaming_interval` (seconds) — window mlx-audio buffers before emitting
+#   each audio chunk. Defaults to 2.0 (server default); lower shortens
+#   first-byte latency but tends to cause glitchy audio in practice.
+# `temperature` (>= 0) — sampler temperature. Lower = more consistent voice
+#   across turns, higher = more variation. Server default is 0.7.
+# `ref_audio` / `ref_text` — voice cloning (CSM and similar). Short WAV +
+#   transcript; both must be set together. Path resolves relative to the
+#   project root.
+#
+# Cloud + local (mlx-audio Qwen3-TTS etc.):
+#
+# `instruct` — free-form style/emotion instruction. Sent as `instruct` to
+#   mlx-audio, as `instructions` to OpenAI cloud TTS. Rejected on Gemini TTS
+#   (which steers via inline [audio tags] in the text instead).
 [[tts]]
 name     = "kokoro"
 provider = "local"
@@ -109,10 +133,7 @@ name     = "chatterbox-turbo"
 provider = "local"
 model    = "mlx-community/chatterbox-turbo-4bit"
 
-# CSM supports voice cloning. Add `ref_audio` (path to a short WAV reference,
-# resolved relative to the project root) and `ref_text` (its transcript) to
-# clone that voice. Both fields must be set together; they only apply on local
-# TTS entries (mlx-audio). See models/tts/csm.md in the mlx-audio repo.
+# CSM: voice cloning via `ref_audio` + `ref_text` (both required).
 [[tts]]
 name      = "csm"
 provider  = "local"
@@ -120,13 +141,6 @@ model     = "mlx-community/csm-1b-8bit"
 ref_audio = "voices/gemini-sulafat.wav"
 ref_text  = "Hello there! I'm here to help you navigate whatever you're working on today. If things feel a bit complicated, don't worry, we'll figure it out together, one step at a time. Just let me know what you need, and I'll be right here to assist you."
 
-# `instruct` = free-form style/emotion instruction. Works on:
-#   - local mlx-audio models that support it (Qwen3-TTS, etc. — sent as
-#     `instruct` in the request body; other local models silently ignore it).
-#   - OpenAI cloud TTS (gpt-4o-mini-tts and family — sent as `instructions`).
-#   - NOT Gemini TTS (steer via inline [audio tags] in the text instead).
-# `temperature` tames the sampler (local TTS only) — lower = more consistent
-# voice across turns, higher = more variation. Server default is 0.7.
 [[tts]]
 name        = "qwen-3-tts-0.6b"
 provider    = "local"
@@ -145,15 +159,12 @@ instruct = "Speak in a warm, cheerful, friendly, conversational tone and pace."
 # Gemini TTS via native generateContent API (not OpenAI-compatible — we wrap it).
 # Needs GEMINI_API_KEY in .env.
 # Voices: See https://ai.google.dev/gemini-api/docs/speech-generation#voices for the full list.
-# `split = "full"` sends one TTS request per turn (not one per sentence), to
-# stay under Gemini's very harsh daily request quotas. Costs first-audio
-# latency — you hear nothing until the LLM finishes — but avoids burning the
-# quota in a single conversation. Options: "sentence" (default) / "paragraph"
-# / "full".
+# `split = "paragraph"` batches TTS requests to stay under Gemini's very tight
+# daily request quotas; "sentence" burns through the quota in a few turns.
 [[tts]]
 name     = "gemini-3.1-flash-tts-preview"
 provider = "cloud"
 vendor   = "gemini"
 model    = "gemini-3.1-flash-tts-preview"
 voice    = "Sulafat"
-split    = "full"
+split    = "paragraph"
