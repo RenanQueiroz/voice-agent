@@ -153,7 +153,10 @@ class AgentTurn(Widget):
 
         parts: list[str] = []
         if m.llm_seconds > 0:
-            parts.append(f"{_label('LLM', llm_name)} {m.llm_seconds:.1f}s")
+            llm_part = f"{_label('LLM', llm_name)} {m.llm_seconds:.1f}s"
+            if m.llm_first_token_seconds > 0:
+                llm_part += f" (TTFT {m.llm_first_token_seconds:.1f}s)"
+            parts.append(llm_part)
         if m.tts_seconds > 0:
             parts.append(f"{_label('TTS', tts_name)} {m.tts_seconds:.1f}s")
         if m.total_seconds > 0:

@@ -23,6 +23,9 @@ class TurnMetrics:
 
     stt_seconds: float = 0.0
     llm_seconds: float = 0.0
+    llm_first_token_seconds: float = 0.0  # TTFT — useful for spotting slow
+    # streaming endpoints (Gemini OpenAI-compat in particular) where total
+    # time looks fine but first-byte is high.
     llm_tokens: int = 0
     tts_seconds: float = 0.0
     tts_first_byte_seconds: float = 0.0

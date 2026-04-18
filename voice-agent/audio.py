@@ -239,11 +239,11 @@ class AudioPlayer:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                # The SDK re-raises TTS failures (e.g., a Gemini 429) out of
-                # `result.stream()`. Surface those as inline error cards
-                # instead of letting them escape as "Task exception was
-                # never retrieved".
-                display.api_error(f"TTS error: {e}")
+                # `result.stream()` yields events for the whole pipeline
+                # (STT → LLM → TTS), so ANY upstream failure re-raises here
+                # — not just TTS. Surface it as a generic API error rather
+                # than mislabeling every Gemini 503 / auth failure as "TTS".
+                display.api_error(str(e))
         finally:
             if not self._player.closed:
                 self._player.stop()

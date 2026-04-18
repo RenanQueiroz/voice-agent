@@ -131,6 +131,13 @@ class ModelConfig:
     kv_quant_scheme: str | None = None
     audio_input: bool = False  # LLM accepts audio directly
 
+    # LLM-only: `reasoning_effort` hint. For Gemini 3 preview and GPT-5 models,
+    # `minimal` (or `none` on Gemini 3) dramatically reduces TTFT because the
+    # model skips internal reasoning before emitting tokens. Defaults to None,
+    # which uses the provider's default (typically `medium` — slow for voice).
+    # Accepts: "none" | "minimal" | "low" | "medium" | "high" | "xhigh".
+    reasoning_effort: str | None = None
+
     # Cloud-LLM-only: OpenAI-hosted tools (see providers._hosted_tools)
     hosted_tools: list[str] = field(default_factory=list)
     # For hosted_tools = ["file_search"]: required vector store IDs + optional
@@ -313,6 +320,23 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
             config.voice = voice
 
         if role == "llm":
+            effort = entry.get("reasoning_effort")
+            if effort is not None:
+                if not isinstance(effort, str) or effort not in {
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                }:
+                    raise ConfigError(
+                        f"[[llm]] '{name}' has invalid reasoning_effort "
+                        f"{effort!r}. Allowed: none, minimal, low, medium, "
+                        "high, xhigh."
+                    )
+                config.reasoning_effort = effort
+
             hosted_tools = entry.get("hosted_tools") or []
             if hosted_tools:
                 if provider != "cloud":

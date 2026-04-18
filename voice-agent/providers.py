@@ -20,10 +20,12 @@ from agents import (
     Agent,
     CodeInterpreterTool,
     FileSearchTool,
+    ModelSettings,
     Runner,
     Tool,
     WebSearchTool,
 )
+from openai.types.shared import Reasoning
 from agents.mcp import MCPServer
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from agents.models.openai_responses import OpenAIResponsesModel
@@ -253,6 +255,7 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             self._input_history.append({"role": "user", "content": transcription})
 
         llm_start = time.monotonic()
+        first_token_time = 0.0
         token_count = 0
         agent_started = False
         filler_sent = False
@@ -291,6 +294,8 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                 event.type == "raw_response_event"
                 and event.data.type == "response.output_text.delta"
             ):
+                if first_token_time == 0.0:
+                    first_token_time = time.monotonic() - llm_start
                 if not agent_started and self.show_transcript:
                     self.display.agent_start()
                     agent_started = True
@@ -320,6 +325,7 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             self._background_transcription = None
 
         self.last_metrics.llm_seconds = time.monotonic() - llm_start
+        self.last_metrics.llm_first_token_seconds = first_token_time
         self.last_metrics.llm_tokens = token_count
 
         if self.show_transcript:
@@ -466,10 +472,19 @@ def create_agent(
             "and scoped; if the user declines, accept it and move on."
         )
 
+    model_settings = ModelSettings()
+    if llm.reasoning_effort:
+        # Drops server-side thinking before the first token on Gemini 3
+        # preview + GPT-5 reasoning models, where the default budget can
+        # make TTFT catastrophic for voice (e.g. 16s on gemini-3.1-flash-
+        # lite-preview vs ~1s with reasoning_effort="minimal").
+        model_settings = ModelSettings(reasoning=Reasoning(effort=llm.reasoning_effort))  # type: ignore[arg-type]
+
     return Agent(
         name="Assistant",
         instructions=instructions,
         model=model,
+        model_settings=model_settings,
         mcp_servers=mcp_servers or [],
         tools=tools,
     )

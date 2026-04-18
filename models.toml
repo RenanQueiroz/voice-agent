@@ -62,6 +62,11 @@ model    = "mlx-community/gemma-3-4b-it-4bit"
 name     = "gpt-5.4-mini"
 provider = "cloud"
 model    = "gpt-5.4-mini"
+# Skip server-side thinking before the first token. On GPT-5 reasoning models
+# the default is `medium`, which makes TTFT unacceptable for voice. Accepts:
+# "none" | "minimal" | "low" | "medium" | "high" | "xhigh". Bump this up if
+# you want the model to think harder on complex prompts.
+reasoning_effort = "minimal"
 # OpenAI-hosted tools. Allowed: "web_search", "code_interpreter", "file_search".
 # Only valid on OpenAI cloud LLMs — i.e. `provider = "cloud"` with either no
 # `vendor` field or `vendor = "openai"`. They do NOT work with Gemini or any
@@ -77,6 +82,10 @@ name     = "gemini-3.1-flash-lite-preview"
 provider = "cloud"
 vendor   = "gemini"
 model    = "gemini-3.1-flash-lite-preview"
+# Gemini 3 preview models reason before emitting tokens; with the default
+# budget TTFT on this model is ~16s for voice-sized prompts. "minimal" drops
+# it to ~1s. Set to "low" or higher only if you need reasoning quality.
+reasoning_effort = "minimal"
 # Gemini OpenAI-compatible endpoint doesn't support the newer keys yet (starting with AQ.), so we need a separate legacy key here.
 # Details: https://discuss.ai.google.dev/t/new-aq-prefix-api-keys-fail-on-openai-compatible-endpoints-with-multiple-authentication-credentials-received/140545
 api_key  = "${GEMINI_API_KEY_LEGACY}"
