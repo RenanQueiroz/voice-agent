@@ -120,15 +120,19 @@ model     = "mlx-community/csm-1b-8bit"
 ref_audio = "voices/gemini-sulafat.wav"
 ref_text  = "Hello there! I'm here to help you navigate whatever you're working on today. If things feel a bit complicated, don't worry, we'll figure it out together, one step at a time. Just let me know what you need, and I'll be right here to assist you."
 
-# Qwen3-TTS supports an `instruct` string that steers pronunciation, tone,
-# pacing, and emotion. Ignored by models that don't support it (so it's safe
-# to leave on). See the mlx-audio web-ui-api-server docs for examples.
+# `instruct` = free-form style/emotion instruction. Works on:
+#   - local mlx-audio models that support it (Qwen3-TTS, etc. — sent as
+#     `instruct` in the request body; other local models silently ignore it).
+#   - OpenAI cloud TTS (gpt-4o-mini-tts and family — sent as `instructions`).
+#   - NOT Gemini TTS (steer via inline [audio tags] in the text instead).
+# `temperature` tames the sampler (local TTS only) — lower = more consistent
+# voice across turns, higher = more variation. Server default is 0.7.
 [[tts]]
 name        = "qwen-3-tts-0.6b"
 provider    = "local"
 model       = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"
 voice       = "Sohee"
-instruct    = "Speak in a warm, friendly, conversational tone at a natural pace."
+instruct    = "Speak in a warm, cheerful, friendly, conversational tone and pace."
 temperature = 0.3
 
 [[tts]]
@@ -136,6 +140,7 @@ name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
 voice    = "marin"
+instruct = "Speak in a warm, cheerful, friendly, conversational tone and pace."
 
 # Gemini TTS via native generateContent API (not OpenAI-compatible — we wrap it).
 # Needs GEMINI_API_KEY in .env. 

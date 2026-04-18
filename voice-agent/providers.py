@@ -574,6 +574,31 @@ def _expand_instructions(text: str) -> str:
 # the digits) and correctly matches ellipses and "?!" / "!?".
 _SENT_BOUNDARY_RE = re.compile(r"[.!?]+\s+")
 
+# Markdown hyperlink: `[display text](url)`. We keep the display text and
+# drop the URL — "according to [kotlinlang.org](https://…)" becomes
+# "according to kotlinlang.org" before hitting TTS. The prompt already
+# asks for no hyperlinks, but models cite sources anyway. Audio tags like
+# `[excited]` aren't followed by `(url)`, so they're left alone.
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+# Bare URLs that slipped through without markdown wrapping. TTS reading
+# "h-t-t-p-s-colon-slash-slash" out loud is brutal; strip them entirely.
+_BARE_URL_RE = re.compile(r"https?://\S+")
+
+
+def _clean_for_tts(text: str) -> str:
+    """Strip markdown hyperlinks to their visible text and drop bare URLs.
+
+    Applied inside the sentence splitter so every TTS path (local, OpenAI,
+    Gemini) benefits — without mutating the chunks shown in the UI or stored
+    in the conversation history. Called on each splitter invocation; since
+    the transforms are idempotent, re-cleaning already-cleaned remainder
+    text is a no-op.
+    """
+    text = _MARKDOWN_LINK_RE.sub(r"\1", text)
+    text = _BARE_URL_RE.sub("", text)
+    return text
+
 
 def _eager_sentence_splitter(
     min_length: int = _MIN_TTS_CHARS,
@@ -601,6 +626,8 @@ def _eager_sentence_splitter(
     """
 
     def splitter(text_buffer: str) -> tuple[str, str]:
+        text_buffer = _clean_for_tts(text_buffer)
+
         # 1) Unambiguous boundary inside the buffer (punctuation + space).
         last_match = None
         for m in _SENT_BOUNDARY_RE.finditer(text_buffer):
@@ -639,12 +666,21 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
     else:
         provider = OpenAIVoiceModelProvider()
 
+    # For cloud OpenAI TTS the SDK's OpenAITTSModel reads
+    # TTSModelSettings.instructions and sends it as the `instructions` body
+    # param (which gpt-4o-mini-tts and family honor). For local mlx-audio we
+    # send the same user-facing `instruct` value directly as `instruct` in
+    # StreamingTTSModel.run(). Same config field, right wire name per provider.
+    tts_settings_kwargs: dict[str, object] = {
+        "voice": tts.voice if tts.voice else None,
+        "text_splitter": _eager_sentence_splitter(),
+    }
+    if tts.instruct and tts.provider == "cloud":
+        tts_settings_kwargs["instructions"] = tts.instruct
+
     return VoicePipelineConfig(
         model_provider=provider,
-        tts_settings=TTSModelSettings(
-            voice=tts.voice if tts.voice else None,  # type: ignore[arg-type]
-            text_splitter=_eager_sentence_splitter(),
-        ),
+        tts_settings=TTSModelSettings(**tts_settings_kwargs),  # type: ignore[arg-type]
         tracing_disabled=True,
     )
 

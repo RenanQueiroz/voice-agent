@@ -136,10 +136,11 @@ class ModelConfig:
     # the server's own 2.0. Override per-entry if you want to try lower.
     streaming_interval: float | None = None
 
-    # Local-TTS-only: free-form style/emotion instruction. Some mlx-audio
-    # models (e.g. Qwen3-TTS) accept an `instruct` string in the request
-    # body to steer pronunciation, tone, pacing, etc. Ignored by models
-    # that don't support it.
+    # TTS-only: free-form style/emotion/pronunciation instruction. Applies to
+    # local mlx-audio models that support it (e.g. Qwen3-TTS) and to OpenAI
+    # cloud TTS models (gpt-4o-mini-tts and family, which call the parameter
+    # `instructions`). Translated to the right wire name per provider. Rejected
+    # on Gemini TTS, which steers via inline [audio tags] in the text instead.
     instruct: str | None = None
 
     # Local-TTS-only: sampling temperature. Lower = more deterministic /
@@ -398,15 +399,15 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
 
             instruct = entry.get("instruct")
             if instruct is not None:
-                if provider != "local":
-                    raise ConfigError(
-                        f"[[tts]] '{name}' has instruct but provider = "
-                        f"{provider!r}. Only mlx-audio (local) honors this "
-                        "parameter."
-                    )
                 if not isinstance(instruct, str):
                     raise ConfigError(
                         f"[[tts]] '{name}' instruct must be a string, got {instruct!r}"
+                    )
+                if provider == "cloud" and config.vendor == "gemini":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has instruct but vendor = 'gemini'. "
+                        "Gemini TTS steers via inline [audio tags] in the "
+                        "spoken text, not a separate instruction field."
                     )
                 config.instruct = instruct
 
