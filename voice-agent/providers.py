@@ -42,7 +42,7 @@ from agents.voice.models.openai_stt import OpenAISTTModel
 from agents.voice.models.openai_tts import OpenAITTSModel
 from agents.voice.pipeline_config import VoicePipelineConfig
 
-from .config import ModelConfig, Settings
+from .config import ModelConfig, Settings, compose_agent_instructions
 from .display import TurnMetrics
 
 # Minimum character count before text is sent to TTS (matches SDK's _add_text threshold)
@@ -496,7 +496,7 @@ def create_agent(
             openai_client=openai_client,
         )
 
-    instructions = _expand_instructions(settings.agent_instructions)
+    instructions = _expand_instructions(compose_agent_instructions(settings))
 
     tools: list[Tool] = list(_hosted_tools(llm))
 
@@ -600,6 +600,40 @@ def _clean_for_tts(text: str) -> str:
     return text
 
 
+# Paragraph boundary: blank line (two newlines with only whitespace between).
+_PARAGRAPH_BOUNDARY_RE = re.compile(r"\n[ \t]*\n")
+
+
+def _paragraph_splitter(text_buffer: str) -> tuple[str, str]:
+    """Flush only on paragraph breaks (blank lines). Still cleans markdown
+    links. Good middle ground when per-sentence flushing exhausts rate
+    limits (Gemini TTS) but full-response buffering adds too much latency."""
+    text_buffer = _clean_for_tts(text_buffer)
+    last = None
+    for m in _PARAGRAPH_BOUNDARY_RE.finditer(text_buffer):
+        last = m
+    if last is None:
+        return "", text_buffer
+    return text_buffer[: last.end()], text_buffer[last.end() :]
+
+
+def _no_split_splitter(text_buffer: str) -> tuple[str, str]:
+    """Never flush mid-stream. The SDK's turn-end path (`_turn_done`) sends
+    whatever's left as a single final TTS request, so the whole LLM
+    response is synthesized in one call. Use with rate-limited providers
+    (e.g. Gemini TTS) where each request costs a daily quota slot."""
+    return "", _clean_for_tts(text_buffer)
+
+
+def _select_splitter(mode: str | None) -> Callable[[str], tuple[str, str]]:
+    if mode == "paragraph":
+        return _paragraph_splitter
+    if mode == "full":
+        return _no_split_splitter
+    # Default / "sentence"
+    return _eager_sentence_splitter()
+
+
 def _eager_sentence_splitter(
     min_length: int = _MIN_TTS_CHARS,
 ) -> Callable[[str], tuple[str, str]]:
@@ -673,7 +707,7 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
     # StreamingTTSModel.run(). Same config field, right wire name per provider.
     tts_settings_kwargs: dict[str, object] = {
         "voice": tts.voice if tts.voice else None,
-        "text_splitter": _eager_sentence_splitter(),
+        "text_splitter": _select_splitter(tts.split),
     }
     if tts.instruct and tts.provider == "cloud":
         tts_settings_kwargs["instructions"] = tts.instruct

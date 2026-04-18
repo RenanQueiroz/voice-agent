@@ -148,6 +148,18 @@ class ModelConfig:
     # is 0.7; modify this value if the voice feels inconsistent between turns.
     temperature: float | None = None
 
+    # TTS-only: how to chunk the streamed LLM output before sending to TTS.
+    #   "sentence" (default) — flush per sentence for fastest first-audio.
+    #                          Many requests per turn; good for low-latency
+    #                          local models and OpenAI.
+    #   "paragraph"          — flush on blank lines; fewer requests per turn
+    #                          at the cost of waiting longer for first audio.
+    #   "full"               — don't split at all; one TTS request per turn
+    #                          after the LLM finishes. Highest latency but
+    #                          minimum request count — use this with
+    #                          rate-limited providers like Gemini TTS.
+    split: str | None = None
+
     # Local-LLM-only
     server: LLMServer | None = None
     preset: str | None = (
@@ -432,6 +444,15 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                         f"{config.temperature}"
                     )
 
+            split = entry.get("split")
+            if split is not None:
+                if split not in {"sentence", "paragraph", "full"}:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' split must be one of "
+                        f"'sentence' / 'paragraph' / 'full', got {split!r}"
+                    )
+                config.split = split
+
         if role == "llm":
             effort = entry.get("reasoning_effort")
             if effort is not None:
@@ -631,30 +652,43 @@ def load_settings() -> Settings:
 
     _validate_active_requirements(settings)
 
-    # Append model-specific instruction snippets for whatever's currently
-    # active. Keys are matched case-insensitively against the active model
-    # IDs (STT / LLM / TTS). Prefix a key with `re:` to interpret the rest
-    # as a regex; otherwise it's a substring match.
+    # Validate snippet regexes up-front so a bad regex surfaces at startup
+    # rather than on the first runtime model switch that happens to match it.
+    # The actual matching + concatenation happens in compose_agent_instructions,
+    # called from providers.create_agent every time a pipeline is built.
+    for pattern in settings.model_instruction_snippets:
+        if pattern.startswith("re:"):
+            try:
+                re.compile(pattern[3:], re.IGNORECASE)
+            except re.error as e:
+                raise ConfigError(
+                    f"[agent.model-instructions] invalid regex {pattern!r}: {e}"
+                ) from e
+
+    return settings
+
+
+def compose_agent_instructions(settings: Settings) -> str:
+    """Base agent instructions + any model-specific snippets whose keys match
+    the **currently active** STT / LLM / TTS model IDs. Recomputed on every
+    pipeline rebuild so a runtime Settings-modal swap picks up the right
+    snippets for the newly-active models.
+    """
+    text = settings.agent_instructions
     active_model_names = [
         settings.stt_model.lower(),
         settings.tts_model.lower(),
         settings.llm_model.lower(),
     ]
-    for pattern, text in settings.model_instruction_snippets.items():
+    for pattern, snippet in settings.model_instruction_snippets.items():
         if pattern.startswith("re:"):
-            try:
-                rx = re.compile(pattern[3:], re.IGNORECASE)
-            except re.error as e:
-                raise ConfigError(
-                    f"[agent.model-instructions] invalid regex {pattern!r}: {e}"
-                ) from e
+            rx = re.compile(pattern[3:], re.IGNORECASE)
             matched = any(rx.search(m) for m in active_model_names)
         else:
             matched = any(pattern.lower() in m for m in active_model_names)
         if matched:
-            settings.agent_instructions += text
-
-    return settings
+            text += snippet
+    return text
 
 
 def _validate_active_requirements(settings: Settings) -> None:
