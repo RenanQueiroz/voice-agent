@@ -135,20 +135,24 @@ install_build_tools() {
         fi
     fi
 
+    # libssl-dev / openssl-devel is needed for LLAMA_OPENSSL=ON so
+    # llama-server can fetch GGUFs over HTTPS (the `-hf repo:quant`
+    # syntax in llamacpp-models.ini). Without it, models have to be
+    # pre-downloaded and pointed at with `-m /path/to/file.gguf`.
     echo "Installing build tools via $pkg_mgr (requires sudo)..."
     case "$pkg_mgr" in
         apt)
             $sudo_cmd apt-get update
-            $sudo_cmd apt-get install -y cmake build-essential git
+            $sudo_cmd apt-get install -y cmake build-essential git libssl-dev
             ;;
         dnf)
-            $sudo_cmd dnf install -y cmake gcc gcc-c++ make git
+            $sudo_cmd dnf install -y cmake gcc gcc-c++ make git openssl-devel
             ;;
         pacman)
-            $sudo_cmd pacman -S --needed --noconfirm cmake gcc make git
+            $sudo_cmd pacman -S --needed --noconfirm cmake gcc make git openssl
             ;;
         zypper)
-            $sudo_cmd zypper install -y cmake gcc gcc-c++ make git
+            $sudo_cmd zypper install -y cmake gcc gcc-c++ make git libopenssl-devel
             ;;
         *)
             echo "Error: unsupported package manager: $pkg_mgr" >&2
@@ -173,17 +177,38 @@ install_source_cuda() {
             missing+=("$cmd")
         fi
     done
+    # OpenSSL headers are required for LLAMA_OPENSSL=ON (HTTPS fetch for
+    # `-hf repo:quant` in llamacpp-models.ini). Detect via the header path
+    # — distro-independent and cheap.
+    local has_openssl_hdr=0
+    for hdr in /usr/include/openssl/ssl.h /usr/local/include/openssl/ssl.h; do
+        if [ -f "$hdr" ]; then
+            has_openssl_hdr=1
+            break
+        fi
+    done
+    if [ "$has_openssl_hdr" -eq 0 ]; then
+        missing+=("openssl-dev")
+    fi
     if [ "${#missing[@]}" -gt 0 ]; then
-        echo "Missing build tools: ${missing[*]} — installing via package manager..."
+        echo "Missing build deps: ${missing[*]} — installing via package manager..."
         install_build_tools
-        missing=()
+        # Any env change since the last build means our stamped binary is
+        # stale even if the upstream commit hasn't moved (e.g. we just
+        # added OpenSSL and the prior build was HTTPS-less). Wipe the
+        # stamp to force a rebuild.
+        rm -f "$STAMP_FILE"
+        local still_missing=()
         for cmd in "${basic_tools[@]}"; do
             if ! command -v "$cmd" &>/dev/null; then
-                missing+=("$cmd")
+                still_missing+=("$cmd")
             fi
         done
-        if [ "${#missing[@]}" -gt 0 ]; then
-            echo "Error: still missing after install attempt: ${missing[*]}" >&2
+        if [ ! -f /usr/include/openssl/ssl.h ] && [ ! -f /usr/local/include/openssl/ssl.h ]; then
+            still_missing+=("openssl-dev")
+        fi
+        if [ "${#still_missing[@]}" -gt 0 ]; then
+            echo "Error: still missing after install attempt: ${still_missing[*]}" >&2
             exit 1
         fi
     fi
@@ -235,11 +260,12 @@ install_source_cuda() {
     # Fresh build dir so upstream CMake / flag changes can't leak stale state.
     rm -rf "$SRC_DIR/build"
 
-    echo "Configuring (GGML_CUDA=ON, CMAKE_CUDA_ARCHITECTURES=native)..."
+    echo "Configuring (GGML_CUDA=ON, CMAKE_CUDA_ARCHITECTURES=native, LLAMA_OPENSSL=ON)..."
     cmake -S "$SRC_DIR" -B "$SRC_DIR/build" \
         -DGGML_CUDA=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES=native \
+        -DLLAMA_OPENSSL=ON \
         -DLLAMA_BUILD_TESTS=OFF
 
     echo "Building (this takes several minutes)..."
