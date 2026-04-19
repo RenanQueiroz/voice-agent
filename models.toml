@@ -136,27 +136,6 @@ model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
 
 [[tts]]
-name     = "chatterbox-turbo"
-provider = "local"
-model    = "mlx-community/chatterbox-turbo-4bit"
-
-# CSM: voice cloning via `ref_audio` + `ref_text` (both required).
-[[tts]]
-name      = "csm"
-provider  = "local"
-model     = "mlx-community/csm-1b-8bit"
-ref_audio = "voices/gemini-sulafat.wav"
-ref_text  = "Hello there! I'm here to help you navigate whatever you're working on today. If things feel a bit complicated, don't worry, we'll figure it out together, one step at a time. Just let me know what you need, and I'll be right here to assist you."
-
-[[tts]]
-name        = "qwen-3-tts-0.6b"
-provider    = "local"
-model       = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-bf16"
-voice       = "Sohee"
-instruct    = "Speak in a warm, cheerful, friendly, conversational tone and pace."
-temperature = 0.3
-
-[[tts]]
 name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
