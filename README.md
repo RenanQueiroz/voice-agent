@@ -20,7 +20,7 @@ Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cl
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
-- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), downloads the matching llama.cpp binary for the host platform, and patches known compatibility issues.
+- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
 - **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-lm` / `mlx-vlm` / `mlx-audio`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
 - **Per-turn metrics**: STT, LLM (with TTFT), TTS, and total timing inline with each turn.
 
@@ -33,7 +33,7 @@ Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cl
 - **Python 3.14+**
 - **[uv](https://docs.astral.sh/uv/)** package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 - **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
-- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON` and `setup-llamacpp.sh` downloads the CUDA-enabled llama.cpp asset.
+- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON`. `setup-llamacpp.sh` also builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt.
 - An **OpenAI** and/or **Gemini API key** for any cloud role.
 
 ## Quick start
@@ -399,7 +399,7 @@ voice-agent/
 | `./start.sh`              | Run the voice agent                                                 |
 | `./setup.sh`              | Install all dependencies (core + local)                             |
 | `./setup.sh --update`     | Update all dependencies                                             |
-| `./setup-llamacpp.sh`     | Download/update the `llama-server` binary (llamacpp backend)        |
+| `./setup-llamacpp.sh`     | Install/update `llama-server` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
 | `./setup-whispercpp.sh`   | Build whisper.cpp and download the selected whisper model           |
 
 ## Development

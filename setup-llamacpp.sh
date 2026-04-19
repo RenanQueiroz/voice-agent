@@ -1,29 +1,43 @@
 #!/bin/bash
 set -euo pipefail
 
-# Downloads and extracts the latest llama.cpp prebuilt release for the
-# current OS / architecture into ./llamacpp, overwriting existing files
-# there. Skips the download when the installed version already matches
-# the latest.
+# Installs llama.cpp into ./llamacpp. Two paths:
 #
-# Platform selection:
-#   macOS arm64    → llama-{tag}-bin-macos-arm64.tar.gz
-#   Linux x86_64   → llama-{tag}-bin-ubuntu-x64.zip (CPU)
-#                    or CUDA build if an NVIDIA GPU is detected
-#   Linux aarch64  → llama-{tag}-bin-ubuntu-arm64.zip
+#   macOS arm64, Linux CPU x86_64, Linux aarch64:
+#     Download and extract the latest prebuilt release from GitHub.
+#     Up-to-date check uses `llama-cli --version` vs. the release tag.
 #
-# CUDA detection is a simple `nvidia-smi` probe; we try the CUDA build
-# first and fall back to the CPU build if the exact asset 404s, so the
-# script stays useful even when the CUDA asset naming changes upstream.
+#   Linux x86_64 + NVIDIA (nvcc in PATH):
+#     Clone ggml-org/llama.cpp and build from source with CUDA enabled,
+#     targeting the host GPU (CMAKE_CUDA_ARCHITECTURES=native). The
+#     upstream releases page has no Ubuntu+CUDA asset, so we build to
+#     get CUDA on Linux. The last-built commit SHA is recorded in
+#     ./llamacpp/.built-commit; if `git ls-remote HEAD` matches the
+#     stamp we skip the rebuild entirely.
+#
+# If nvcc is missing (NVIDIA driver only, no CUDA Toolkit) we fall back
+# to the CPU prebuilt with a warning — llama.cpp is still usable without
+# a GPU, just slower.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$DIR/llamacpp"
-TMPFILE=$(mktemp /tmp/llamacpp-XXXXXX)
-trap 'rm -f "$TMPFILE"' EXIT
+SRC_DIR="$DIR/llamacpp-src"
+STAMP_FILE="$INSTALL_DIR/.built-commit"
 
-UPDATED=0
+TMPFILE=$(mktemp /tmp/llamacpp-XXXXXX)
+TMPDIR_EXTRACT=""
+cleanup() {
+    rm -f "$TMPFILE"
+    if [ -n "$TMPDIR_EXTRACT" ] && [ -d "$TMPDIR_EXTRACT" ]; then
+        rm -rf "$TMPDIR_EXTRACT"
+    fi
+}
+trap cleanup EXIT
 
 LLAMA_REPO="ggml-org/llama.cpp"
+LLAMA_REPO_URL="https://github.com/$LLAMA_REPO.git"
+
+UPDATED=0
 
 # --- Detect platform ---
 
@@ -52,118 +66,308 @@ case "$OS_NAME" in
         ;;
 esac
 
-# --- Find the latest release tag ---
+# --- Decide install mode ---
 
-echo "Checking llama.cpp..."
-LLAMA_TAG=$(curl -sf "https://api.github.com/repos/$LLAMA_REPO/releases/latest" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-
-if [ -z "$LLAMA_TAG" ]; then
-    echo "Error: could not determine latest llama.cpp release tag" >&2
-    exit 1
+# On Linux x86_64 with an NVIDIA GPU we try the source-CUDA build. nvcc
+# can live outside PATH (CUDA Toolkit typically installs to /usr/local/cuda);
+# probe the common locations before giving up.
+if ! command -v nvcc &>/dev/null; then
+    for p in /usr/local/cuda/bin /opt/cuda/bin; do
+        if [ -x "$p/nvcc" ]; then
+            export PATH="$p:$PATH"
+            break
+        fi
+    done
 fi
 
-# Tag is e.g. "b8763"; local version reports "8763".
-LLAMA_LATEST="${LLAMA_TAG#b}"
-LLAMA_LOCAL=$("$INSTALL_DIR/llama-cli" --version 2>&1 | grep -o 'version: [0-9]*' | cut -d' ' -f2 || echo "")
+INSTALL_MODE="prebuilt"
+if [ "$OS_NAME" = "Linux" ] && [ "$ARCH" = "x86_64" ]; then
+    if command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null; then
+        if command -v nvcc &>/dev/null; then
+            INSTALL_MODE="source-cuda"
+        else
+            echo "NVIDIA GPU detected, but nvcc is not in PATH."
+            echo "  Install the CUDA Toolkit (https://developer.nvidia.com/cuda-downloads)"
+            echo "  and ensure nvcc is reachable to build llama.cpp with CUDA."
+            echo "  Falling back to the CPU prebuilt."
+        fi
+    fi
+fi
 
-if [ "$LLAMA_LOCAL" = "$LLAMA_LATEST" ]; then
-    echo "llama.cpp is already up to date ($LLAMA_TAG)."
-else
-    echo "Updating llama.cpp: ${LLAMA_LOCAL:-not installed} -> $LLAMA_LATEST"
+# --- Build-tool auto-install (Linux) ---
 
-    # --- Pick the asset for this platform ---
+detect_linux_pkg_mgr() {
+    # Prefer /etc/os-release so we pick the distro's actual manager even
+    # when several are installed. Fall back to PATH probing.
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case " ${ID:-} ${ID_LIKE:-} " in
+            *" debian "*|*" ubuntu "*)     echo apt;    return ;;
+            *" fedora "*|*" rhel "*|*" centos "*) echo dnf; return ;;
+            *" arch "*|*" manjaro "*)      echo pacman; return ;;
+            *" suse "*|*" opensuse "*|*" opensuse-leap "*|*" opensuse-tumbleweed "*) echo zypper; return ;;
+        esac
+    fi
+    for mgr in apt-get dnf pacman zypper; do
+        if command -v "$mgr" &>/dev/null; then
+            case "$mgr" in apt-get) echo apt ;; *) echo "$mgr" ;; esac
+            return
+        fi
+    done
+}
 
-    CUDA_AVAILABLE=0
-    if [ "$OS_NAME" = "Linux" ] && [ "$ARCH" = "x86_64" ] && command -v nvidia-smi &> /dev/null; then
-        if nvidia-smi -L &> /dev/null; then
-            CUDA_AVAILABLE=1
+install_build_tools() {
+    local pkg_mgr
+    pkg_mgr=$(detect_linux_pkg_mgr)
+    if [ -z "$pkg_mgr" ]; then
+        echo "Error: could not detect a supported Linux package manager." >&2
+        return 1
+    fi
+
+    local sudo_cmd=""
+    if [ "$(id -u)" != "0" ]; then
+        if command -v sudo &>/dev/null; then
+            sudo_cmd="sudo"
+        else
+            echo "Error: need root or sudo to install build tools via $pkg_mgr." >&2
+            return 1
         fi
     fi
 
-    # Candidate list: each entry is "<asset-filename>". The first entry that
-    # downloads successfully wins. On Linux+CUDA we try a CUDA build first;
-    # otherwise we go straight to the CPU/Apple-Silicon asset.
-    CANDIDATES=()
+    echo "Installing build tools via $pkg_mgr (requires sudo)..."
+    case "$pkg_mgr" in
+        apt)
+            $sudo_cmd apt-get update
+            $sudo_cmd apt-get install -y cmake build-essential git
+            ;;
+        dnf)
+            $sudo_cmd dnf install -y cmake gcc gcc-c++ make git
+            ;;
+        pacman)
+            $sudo_cmd pacman -S --needed --noconfirm cmake gcc make git
+            ;;
+        zypper)
+            $sudo_cmd zypper install -y cmake gcc gcc-c++ make git
+            ;;
+        *)
+            echo "Error: unsupported package manager: $pkg_mgr" >&2
+            return 1
+            ;;
+    esac
+}
+
+# --- Source build: Linux x86_64 + CUDA ---
+
+install_source_cuda() {
+    echo "Checking llama.cpp (source build, CUDA)..."
+
+    # nvcc is part of the CUDA Toolkit (multi-GB, often needs NVIDIA's repo
+    # configured first), so we don't auto-install it — error with a hint
+    # instead. The rest of the toolchain is a single apt/dnf/pacman/zypper
+    # line, which we run transparently if anything is missing.
+    local basic_tools=(git cmake make gcc g++)
+    local missing=()
+    for cmd in "${basic_tools[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "Missing build tools: ${missing[*]} — installing via package manager..."
+        install_build_tools
+        missing=()
+        for cmd in "${basic_tools[@]}"; do
+            if ! command -v "$cmd" &>/dev/null; then
+                missing+=("$cmd")
+            fi
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Error: still missing after install attempt: ${missing[*]}" >&2
+            exit 1
+        fi
+    fi
+    if ! command -v nvcc &>/dev/null; then
+        echo "Error: nvcc not found. Install the CUDA Toolkit:" >&2
+        echo "  https://developer.nvidia.com/cuda-downloads" >&2
+        exit 1
+    fi
+
+    local remote_sha
+    remote_sha=$(git ls-remote "$LLAMA_REPO_URL" HEAD | awk '{print $1}')
+    if [ -z "$remote_sha" ]; then
+        echo "Error: could not resolve upstream HEAD of $LLAMA_REPO_URL" >&2
+        exit 1
+    fi
+
+    local local_sha=""
+    if [ -f "$STAMP_FILE" ]; then
+        local_sha=$(cat "$STAMP_FILE")
+    fi
+
+    if [ "$local_sha" = "$remote_sha" ] && [ -x "$INSTALL_DIR/llama-server" ]; then
+        echo "llama.cpp is already up to date (commit ${remote_sha:0:12})."
+        return 0
+    fi
+
+    if [ -n "$local_sha" ]; then
+        echo "Updating llama.cpp: ${local_sha:0:12} -> ${remote_sha:0:12}"
+    else
+        echo "Building llama.cpp from source at ${remote_sha:0:12}"
+    fi
+
+    if [ ! -d "$SRC_DIR/.git" ]; then
+        echo "Cloning $LLAMA_REPO_URL into $SRC_DIR..."
+        git clone "$LLAMA_REPO_URL" "$SRC_DIR"
+    else
+        echo "Fetching latest commits..."
+        git -C "$SRC_DIR" fetch --prune origin
+    fi
+    git -C "$SRC_DIR" checkout --detach "$remote_sha"
+
+    # Fresh build dir so upstream CMake / flag changes can't leak stale state.
+    rm -rf "$SRC_DIR/build"
+
+    echo "Configuring (GGML_CUDA=ON, CMAKE_CUDA_ARCHITECTURES=native)..."
+    cmake -S "$SRC_DIR" -B "$SRC_DIR/build" \
+        -DGGML_CUDA=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES=native \
+        -DLLAMA_BUILD_TESTS=OFF
+
+    echo "Building (this takes several minutes)..."
+    cmake --build "$SRC_DIR/build" --config Release -j"$(nproc)" \
+        --target llama-server llama-cli
+
+    local build_bin="$SRC_DIR/build/bin"
+    if [ ! -x "$build_bin/llama-server" ]; then
+        echo "Error: llama-server not found after build at $build_bin." >&2
+        exit 1
+    fi
+
+    echo "Installing to $INSTALL_DIR..."
+    mkdir -p "$INSTALL_DIR"
+    # Flat layout (binaries + shared libs in INSTALL_DIR) to match the
+    # prebuilt path so servers.py doesn't care which mode produced the tree.
+    find "$build_bin" -maxdepth 1 -type f -executable -exec cp -af {} "$INSTALL_DIR/" \;
+    find "$SRC_DIR/build" -name '*.so*' -exec cp -af {} "$INSTALL_DIR/" \;
+
+    echo "$remote_sha" > "$STAMP_FILE"
+    echo "llama.cpp built from source (${remote_sha:0:12})."
+    UPDATED=1
+}
+
+# --- Prebuilt: macOS arm64, Linux CPU / arm64 ---
+
+install_prebuilt() {
+    echo "Checking llama.cpp (prebuilt)..."
+
+    local llama_tag
+    llama_tag=$(curl -sf "https://api.github.com/repos/$LLAMA_REPO/releases/latest" \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+    if [ -z "$llama_tag" ]; then
+        echo "Error: could not determine latest llama.cpp release tag" >&2
+        exit 1
+    fi
+
+    # Tag is e.g. "b8763"; local version reports "8763".
+    local llama_latest="${llama_tag#b}"
+    local llama_local=""
+    if [ -x "$INSTALL_DIR/llama-cli" ]; then
+        llama_local=$("$INSTALL_DIR/llama-cli" --version 2>&1 | grep -o 'version: [0-9]*' | cut -d' ' -f2 || echo "")
+    fi
+
+    # If a previous source build left a stamp, treat the install as dirty
+    # and reinstall from prebuilt so we don't end up with mixed artifacts.
+    if [ "$llama_local" = "$llama_latest" ] && [ ! -f "$STAMP_FILE" ]; then
+        echo "llama.cpp is already up to date ($llama_tag)."
+        return 0
+    fi
+
+    echo "Updating llama.cpp: ${llama_local:-not installed} -> $llama_latest"
+
+    local candidates=()
     case "$OS_NAME" in
         Darwin)
-            CANDIDATES+=("llama-${LLAMA_TAG}-bin-macos-arm64.tar.gz")
+            candidates+=("llama-${llama_tag}-bin-macos-arm64.tar.gz")
             ;;
         Linux)
             if [ "$ARCH" = "x86_64" ]; then
-                if [ "$CUDA_AVAILABLE" = "1" ]; then
-                    # Asset names in the llama.cpp releases change over time
-                    # (e.g. `-cuda-cu12.x-x64.zip`). Probe a couple of common
-                    # variants before falling back to the CPU build.
-                    CANDIDATES+=("llama-${LLAMA_TAG}-bin-ubuntu-x64-cuda.zip")
-                    CANDIDATES+=("llama-${LLAMA_TAG}-bin-ubuntu-cuda-cu12.4-x64.zip")
-                    CANDIDATES+=("llama-${LLAMA_TAG}-bin-ubuntu-cuda-cu12-x64.zip")
-                fi
-                CANDIDATES+=("llama-${LLAMA_TAG}-bin-ubuntu-x64.zip")
+                candidates+=("llama-${llama_tag}-bin-ubuntu-x64.tar.gz")
             else
-                # Linux arm64 (e.g. Raspberry Pi 5, ARM servers)
-                CANDIDATES+=("llama-${LLAMA_TAG}-bin-ubuntu-arm64.zip")
+                candidates+=("llama-${llama_tag}-bin-ubuntu-arm64.tar.gz")
             fi
             ;;
     esac
 
-    ASSET=""
-    for candidate in "${CANDIDATES[@]}"; do
-        url="https://github.com/$LLAMA_REPO/releases/download/$LLAMA_TAG/$candidate"
-        echo "Trying $candidate..."
+    local asset="" url
+    for candidate in "${candidates[@]}"; do
+        url="https://github.com/$LLAMA_REPO/releases/download/$llama_tag/$candidate"
+        echo "Downloading $candidate..."
         if curl -fsSL --progress-bar -o "$TMPFILE" "$url"; then
-            ASSET="$candidate"
+            asset="$candidate"
             break
         fi
-        echo "  not found, trying next candidate."
+        echo "  not found."
     done
 
-    if [ -z "$ASSET" ]; then
-        echo "Error: no matching llama.cpp asset found for $OS_NAME $ARCH (tag $LLAMA_TAG)." >&2
-        echo "  See https://github.com/$LLAMA_REPO/releases/tag/$LLAMA_TAG for the current asset names." >&2
+    if [ -z "$asset" ]; then
+        echo "Error: no matching llama.cpp asset for $OS_NAME $ARCH (tag $llama_tag)." >&2
+        echo "  See https://github.com/$LLAMA_REPO/releases/tag/$llama_tag for asset names." >&2
         exit 1
     fi
 
-    echo "Extracting $ASSET to $INSTALL_DIR..."
-    mkdir -p "$INSTALL_DIR"
-    case "$ASSET" in
+    TMPDIR_EXTRACT=$(mktemp -d)
+
+    echo "Extracting $asset..."
+    case "$asset" in
         *.tar.gz)
-            tar -xzf "$TMPFILE" --strip-components=1 -C "$INSTALL_DIR"
+            tar -xzf "$TMPFILE" -C "$TMPDIR_EXTRACT"
             ;;
         *.zip)
-            if ! command -v unzip &> /dev/null; then
-                echo "Error: unzip is required to extract $ASSET but is not installed." >&2
+            if ! command -v unzip &>/dev/null; then
+                echo "Error: unzip is required to extract $asset but is not installed." >&2
                 echo "  Install it with your package manager (apt install unzip / dnf install unzip / pacman -S unzip)." >&2
                 exit 1
             fi
-            TMPDIR=$(mktemp -d)
-            unzip -q "$TMPFILE" -d "$TMPDIR"
-            # llama.cpp zips typically contain a `build/bin/…` layout. Find
-            # the directory holding `llama-server` and copy its contents to
-            # the install dir so we match the tar.gz strip-components=1 shape.
-            SERVER_BIN="$(find "$TMPDIR" -type f -name 'llama-server' -print -quit)"
-            if [ -z "$SERVER_BIN" ]; then
-                echo "Error: llama-server not found inside $ASSET." >&2
-                rm -rf "$TMPDIR"
-                exit 1
-            fi
-            BIN_DIR="$(dirname "$SERVER_BIN")"
-            cp -R "$BIN_DIR/." "$INSTALL_DIR/"
-            # Copy shared libs alongside the binary (CUDA builds ship libggml-cuda.so etc.)
-            LIB_DIR="$(dirname "$BIN_DIR")/lib"
-            if [ -d "$LIB_DIR" ]; then
-                cp -R "$LIB_DIR/." "$INSTALL_DIR/"
-            fi
-            rm -rf "$TMPDIR"
+            unzip -q "$TMPFILE" -d "$TMPDIR_EXTRACT"
             ;;
         *)
-            echo "Error: unrecognized archive extension for $ASSET." >&2
+            echo "Error: unrecognized archive extension for $asset." >&2
             exit 1
             ;;
     esac
 
-    echo "llama.cpp $LLAMA_TAG installed ($ASSET)."
+    local server_bin
+    server_bin="$(find "$TMPDIR_EXTRACT" -type f -name 'llama-server' -print -quit)"
+    if [ -z "$server_bin" ]; then
+        echo "Error: llama-server not found inside $asset." >&2
+        exit 1
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+    local bin_dir lib_dir
+    bin_dir="$(dirname "$server_bin")"
+    cp -R "$bin_dir/." "$INSTALL_DIR/"
+    lib_dir="$(dirname "$bin_dir")/lib"
+    if [ -d "$lib_dir" ]; then
+        cp -R "$lib_dir/." "$INSTALL_DIR/"
+    fi
+
+    # We're on a prebuilt now; drop any stale source-build stamp so the
+    # next run doesn't mistakenly short-circuit on commit comparison.
+    rm -f "$STAMP_FILE"
+
+    echo "llama.cpp $llama_tag installed ($asset)."
     UPDATED=1
+}
+
+# --- Run ---
+
+if [ "$INSTALL_MODE" = "source-cuda" ]; then
+    install_source_cuda
+else
+    install_prebuilt
 fi
 
 echo

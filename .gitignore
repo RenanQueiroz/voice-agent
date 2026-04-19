@@ -13,6 +13,9 @@ logs/
 # llama.cpp binaries
 llamacpp/
 
+# llama.cpp source checkout (used for the Linux+CUDA source build)
+llamacpp-src/
+
 # whisper.cpp binaries and models
 whispercpp/
 
