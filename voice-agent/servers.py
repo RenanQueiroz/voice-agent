@@ -259,7 +259,13 @@ class ServerManager:
                     if resp.status_code == 200:
                         self.display.server_ready_one(display_name)
                         return True
-                except httpx.ConnectError:
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    # ConnectError: TCP refused (not listening yet).
+                    # ConnectTimeout: SYN got no answer (process running but
+                    # hasn't bound to the port — e.g. whisper-server stuck
+                    # because ffmpeg is missing). Both mean "not ready yet";
+                    # let the outer STARTUP_TIMEOUT bound the wait instead of
+                    # letting the exception kill the worker.
                     t = int(elapsed)
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)

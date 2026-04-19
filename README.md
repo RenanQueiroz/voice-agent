@@ -32,7 +32,13 @@ Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cl
   - **Windows**: not supported natively — install [WSL2](https://learn.microsoft.com/windows/wsl/install) and run the app from a Linux shell.
 - **Python 3.14+**
 - **[uv](https://docs.astral.sh/uv/)** package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
-- **PortAudio** runtime library (Linux only) — required by the `sounddevice` Python package, which dlopens it at import time. `./setup.sh` installs it via the detected package manager (`libportaudio2` on apt/zypper, `portaudio` on dnf/pacman). macOS ships it bundled in the `sounddevice` wheel.
+- **Audio system libraries (Linux only)** — `./setup.sh` installs three packages via the detected package manager:
+  - **PortAudio runtime** — `sounddevice` dlopens `libportaudio.so.2` at import time (`libportaudio2` on apt/zypper, `portaudio` on dnf/pacman).
+  - **PulseAudio utils** (`pulseaudio-utils` / `libpulse`) — provides `pactl` for audio diagnostics.
+  - **ALSA↔PulseAudio bridge** (`libasound2-plugins` / `alsa-plugins-pulseaudio` / `alsa-plugins`) — required on WSL2, where the only audio path is WSLg's PulseAudio socket (`/mnt/wslg/PulseServer`). Without this plugin, PortAudio's ALSA host finds no devices and the app crashes with `PortAudioError: Error querying device -1`. Harmless on native Linux (usually installed by the desktop already).
+
+  macOS ships PortAudio bundled in the `sounddevice` wheel, so none of the above apply.
+- **ffmpeg** (local whisper STT only) — `whisper-server` uses it for audio transcoding via `--convert`. Auto-installed by `setup-whispercpp.sh` via the detected package manager.
 - **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
 - **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON`. `setup-llamacpp.sh` also builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt.
 - An **OpenAI** and/or **Gemini API key** for any cloud role.

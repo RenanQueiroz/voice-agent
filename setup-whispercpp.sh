@@ -36,6 +36,52 @@ SUPPORTED_MODELS=(
 
 OS_NAME="$(uname -s)"
 
+# --- Install ffmpeg if missing ---
+#
+# whisper-server is launched with `--convert`, which shells out to ffmpeg to
+# transcode incoming audio. Without ffmpeg on PATH, the server logs
+# "ffmpeg is not found." and never binds to its port — every health probe
+# times out and the role-start flow fails opaquely.
+
+install_ffmpeg() {
+    case "$OS_NAME" in
+        Darwin)
+            if ! command -v brew &> /dev/null; then
+                echo "Error: ffmpeg is required but neither ffmpeg nor Homebrew are installed." >&2
+                echo "Install ffmpeg manually: https://ffmpeg.org/download.html" >&2
+                exit 1
+            fi
+            echo "ffmpeg not found, installing via Homebrew..."
+            brew install ffmpeg > /dev/null 2>&1
+            ;;
+        Linux)
+            if command -v apt-get &> /dev/null; then
+                echo "ffmpeg not found, installing via apt..."
+                sudo apt-get update -qq
+                sudo apt-get install -y ffmpeg
+            elif command -v dnf &> /dev/null; then
+                echo "ffmpeg not found, installing via dnf..."
+                sudo dnf install -y ffmpeg
+            elif command -v pacman &> /dev/null; then
+                echo "ffmpeg not found, installing via pacman..."
+                sudo pacman -S --noconfirm ffmpeg
+            elif command -v zypper &> /dev/null; then
+                echo "ffmpeg not found, installing via zypper..."
+                sudo zypper install -y ffmpeg
+            else
+                echo "Error: ffmpeg is required but no supported package manager was found." >&2
+                echo "Install ffmpeg manually: https://ffmpeg.org/download.html" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Error: ffmpeg is required but this script doesn't know how to install it on $OS_NAME." >&2
+            exit 1
+            ;;
+    esac
+    echo "ffmpeg installed."
+}
+
 # --- Install cmake if missing ---
 
 install_cmake() {
@@ -92,6 +138,12 @@ fi
 mkdir -p "$INSTALL_DIR" "$MODELS_DIR"
 
 UPDATED=0
+
+# --- Ensure ffmpeg is installed (required at runtime by whisper-server --convert) ---
+
+if ! command -v ffmpeg &> /dev/null; then
+    install_ffmpeg
+fi
 
 # --- Build whisper.cpp ---
 
