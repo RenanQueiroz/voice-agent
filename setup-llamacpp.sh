@@ -216,14 +216,21 @@ install_source_cuda() {
         echo "Building llama.cpp from source at ${remote_sha:0:12}"
     fi
 
+    # Shallow clone/fetch — we only ever build tip-of-master, so full
+    # history wastes hundreds of MB. Upstream can advance between
+    # `ls-remote` above and the fetch below; that's fine, we stamp
+    # whatever we actually checked out and the next run will notice.
     if [ ! -d "$SRC_DIR/.git" ]; then
-        echo "Cloning $LLAMA_REPO_URL into $SRC_DIR..."
-        git clone "$LLAMA_REPO_URL" "$SRC_DIR"
+        echo "Cloning $LLAMA_REPO_URL into $SRC_DIR (shallow)..."
+        git clone --depth 1 "$LLAMA_REPO_URL" "$SRC_DIR"
     else
-        echo "Fetching latest commits..."
-        git -C "$SRC_DIR" fetch --prune origin
+        echo "Fetching latest commit..."
+        git -C "$SRC_DIR" fetch --depth 1 origin HEAD
+        git -C "$SRC_DIR" reset --hard FETCH_HEAD
     fi
-    git -C "$SRC_DIR" checkout --detach "$remote_sha"
+
+    local built_sha
+    built_sha=$(git -C "$SRC_DIR" rev-parse HEAD)
 
     # Fresh build dir so upstream CMake / flag changes can't leak stale state.
     rm -rf "$SRC_DIR/build"
@@ -252,8 +259,8 @@ install_source_cuda() {
     find "$build_bin" -maxdepth 1 -type f -executable -exec cp -af {} "$INSTALL_DIR/" \;
     find "$SRC_DIR/build" -name '*.so*' -exec cp -af {} "$INSTALL_DIR/" \;
 
-    echo "$remote_sha" > "$STAMP_FILE"
-    echo "llama.cpp built from source (${remote_sha:0:12})."
+    echo "$built_sha" > "$STAMP_FILE"
+    echo "llama.cpp built from source (${built_sha:0:12})."
     UPDATED=1
 }
 
