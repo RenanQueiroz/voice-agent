@@ -48,10 +48,17 @@ model    = "gpt-4o-transcribe"
 # when BOTH the STT and LLM are local (they share the same whisper audio
 # buffer — see providers.py).
 [[llm]]
-name        = "qwen3.6-35b-a3b-instruct (llamacpp)"
+name        = "qwen3.6-35b-a3b-instruct-q4_k_xl (llamacpp)"
 provider    = "local"
 runtime     = "llamacpp"
-model       = "qwen3.6-35b-a3b-instruct"     # must match a section alias in the preset
+model       = "qwen3.6-35b-a3b-instruct-q4_k_xl"     # must match a section alias in the preset
+preset      = "llamacpp-models.ini"
+
+[[llm]]
+name        = "qwen3.6-35b-a3b-instruct-q2_k_xl (llamacpp)"
+provider    = "local"
+runtime     = "llamacpp"
+model       = "qwen3.6-35b-a3b-instruct-q2_k_xl"     # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 
 [[llm]]
