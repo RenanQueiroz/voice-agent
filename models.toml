@@ -6,6 +6,17 @@
 # The "(local)" / "(cloud)" suffix is added to the display name automatically
 # from `provider` — don't include it in `name`.
 #
+# Local entries must declare a `runtime`. Registered runtimes per role:
+#   STT — whispercpp (linux + macOS)
+#   LLM — llamacpp   (linux + macOS),
+#         mlx-lm    (macOS only),
+#         mlx-vlm   (macOS only)
+#   TTS — mlx-audio  (macOS only)
+# Entries whose runtime isn't supported on the current OS are filtered out
+# of the Switch modal at startup; if preferences.toml points at a filtered
+# entry the app auto-falls back to the first compatible one and shows a
+# notice. Cloud entries are always available.
+#
 # Per-model `api_key` override (cloud entries only): set this when one vendor
 # key is rate-limited or scoped to a subset of models — e.g. a legacy Gemini
 # key that still works on the LLM endpoint alongside a newer key for TTS.
@@ -23,6 +34,7 @@
 [[stt]]
 name     = "whisper-turbo"
 provider = "local"
+runtime  = "whispercpp"
 model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
 
 [[stt]]
@@ -31,21 +43,21 @@ provider = "cloud"
 model    = "gpt-4o-transcribe"
 
 # ── LLM catalog ───────────────────────────────────────────
-# Local entries must set `server` (mlx-vlm / mlx-lm / llamacpp). `audio_input`
+# Local entries must set `runtime` (llamacpp / mlx-lm / mlx-vlm). `audio_input`
 # lets the LLM accept audio directly, skipping STT latency; only meaningful
 # when BOTH the STT and LLM are local (they share the same whisper audio
 # buffer — see providers.py).
 [[llm]]
 name        = "qwen3.6-35b-a3b-instruct (llamacpp)"
 provider    = "local"
-server      = "llamacpp"
+runtime     = "llamacpp"
 model       = "qwen3.6-35b-a3b-instruct"     # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 
 [[llm]]
 name        = "gemma-4-e4b-it (llamacpp)"
 provider    = "local"
-server      = "llamacpp"
+runtime     = "llamacpp"
 model       = "gemma-4-e4b-it"     # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 audio_input = true
@@ -53,7 +65,7 @@ audio_input = true
 [[llm]]
 name            = "gemma-4-e4b-it (mlx-vlm)"
 provider        = "local"
-server          = "mlx-vlm"
+runtime         = "mlx-vlm"
 model           = "unsloth/gemma-4-E4B-it-UD-MLX-4bit"
 audio_input     = true
 kv_bits         = 3.5
@@ -62,7 +74,7 @@ kv_quant_scheme = "turboquant"
 [[llm]]
 name     = "gemma-3-4b-it (mlx-lm)"
 provider = "local"
-server   = "mlx-lm"
+runtime  = "mlx-lm"
 model    = "mlx-community/gemma-3-4b-it-4bit"
 
 [[llm]]
@@ -132,6 +144,7 @@ api_key  = "${GEMINI_API_KEY_LEGACY}"
 [[tts]]
 name     = "kokoro"
 provider = "local"
+runtime  = "mlx-audio"
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
 

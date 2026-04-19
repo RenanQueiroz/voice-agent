@@ -2,9 +2,24 @@
 
 This document is for AI agents working on this project. It describes the architecture *as it is now* — if you find a discrepancy with the code, trust the code and update this file.
 
+## Keeping the docs in sync
+
+**Whenever you change code, config schemas, dependencies, setup flows, or supported platforms, update both `README.md` and this file (`AGENTS.md`) in the same change.** The two docs have different audiences — `README.md` is user-facing (install, configure, run) and `AGENTS.md` is architectural (why the code is shaped the way it is, pitfalls, internal invariants) — but they should never contradict each other or the code.
+
+Concrete triggers:
+- Adding / removing / renaming a config field in `config.toml`, `models.toml`, `model_deps.toml`, or `preferences.toml` → update the corresponding "Configuration files" / "structure" sections in both docs.
+- Adding a new runtime (new entry in `voice-agent/runtimes.py`) → list it in the runtime table in `README.md` and mention it in the "Runtime registry + OS filtering" section here.
+- Changing OS support or adding a new setup-script branch → update "Prerequisites" in `README.md` and the relevant pitfalls section here.
+- Adding / removing a module under `voice-agent/` → update the "Package structure" blocks in both docs.
+- Any user-visible behaviour change (new keybind, new CLI flag, new error surface) → `README.md` at minimum.
+
+A quick checklist before you finish a change: `grep` the old name/value across `*.md`, `config.toml`, `models.toml`, `pyproject.toml`, and the setup scripts to find stale references.
+
 ## Project overview
 
 Real-time speech-to-speech voice agent built on the OpenAI Agents SDK's `VoicePipeline`. The UI is a fullscreen Textual app. Each role (STT / LLM / TTS) is configured independently as either cloud (OpenAI or Gemini) or local (whisper.cpp / mlx-audio / mlx-vlm / mlx-lm / llama-server); the user can mix-and-match and swap at runtime.
+
+Runs on macOS (all runtimes) and Linux (llama.cpp + whisper.cpp + any cloud role — the mlx stack is Apple-Silicon-only and is filtered out of the catalog on Linux). See the runtime registry below.
 
 ## Package structure
 
@@ -40,17 +55,20 @@ voice-agent/
   preferences.py    # load_preferences / save_preferences (preferences.toml)
   config.py         # Settings + ModelConfig + _parse_catalog +
                     #   _validate_active_requirements + load_settings
+  platform_info.py  # current_os(), linux_package_manager(), has_cuda()
+  runtimes.py       # RUNTIMES registry: per-role runtime IDs, supported OSes,
+                    #   pip module/package names, health paths
 ```
 
 ## Configuration files
 
 - `config.toml` — committed. Everything that isn't a model catalog: `[general]`, `[local]` server URLs, `[vad]`, `[display]`, `[audio]`, `[agent]`, `[shell]`. Catalogs moved out of here (see `models.toml`). Input is always Silero VAD — push-to-talk was removed.
-- `models.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Cloud entries can set `vendor = "gemini"`, per-model `api_key = "${VAR}"`, and on LLMs `reasoning_effort` / `hosted_tools`. This is what the Settings modal picks from.
+- `models.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Local entries must set `runtime` (one of `whispercpp`, `llamacpp`, `mlx-lm`, `mlx-vlm`, `mlx-audio`). Cloud entries can set `vendor = "gemini"`, per-model `api_key = "${VAR}"`, and on LLMs `reasoning_effort` / `hosted_tools`. This is what the Settings modal picks from, after OS filtering (see "Runtime registry" below).
 - `preferences.toml` — gitignored. Three-line file `[active]` with the active `name` per role. Written by the Settings modal. Copy from `preferences.toml.example`.
 - `.env` — gitignored. `OPENAI_API_KEY`, `GEMINI_API_KEY`, any custom keys referenced via `${VAR}` in a model `api_key`, plus env overrides.
 - `mcp_servers.toml` — gitignored. MCP server definitions. Copy from `mcp_servers.toml.example`. Per-server `enabled = false` skips a server without deleting it.
-- `llamacpp-models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `server = "llamacpp"`. Copy from `llamacpp-models.ini.example`.
-- `model_deps.toml` — committed. Maps name patterns to pip/brew deps.
+- `llamacpp-models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `runtime = "llamacpp"`. Copy from `llamacpp-models.ini.example`.
+- `model_deps.toml` — committed. Maps name patterns to pip deps + per-package-manager system deps (`[<pattern>.system]` with `brew`/`apt`/`dnf`/`pacman`/`zypper` keys).
 - `setup-whispercpp.sh` / `setup-llamacpp.sh` — committed.
 
 Priority: environment variable > `.env` > `config.toml`.
@@ -90,13 +108,23 @@ Config has a *catalog* per role, not a single `voice_mode`:
 [[stt]]  name = "gpt-4o-transcribe" provider = "cloud" model = "..."
 ```
 
-`ModelConfig` ([voice-agent/config.py](voice-agent/config.py)) has the fields for all roles; `_parse_catalog` validates role-specific ones (e.g., `server` / `preset` on local LLMs, `voice` on TTS, `hosted_tools` / `reasoning_effort` on cloud LLMs, `vendor` only on cloud, `api_key` only on cloud). `Settings.stt / llm / tts` are properties that look up the active entry by name.
+`ModelConfig` ([voice-agent/config.py](voice-agent/config.py)) has the fields for all roles; `_parse_catalog` validates role-specific ones (e.g., `runtime` on any local entry, `preset` on local `llamacpp` LLMs, `voice` on TTS, `hosted_tools` / `reasoning_effort` on cloud LLMs, `vendor` only on cloud, `api_key` only on cloud). `Settings.stt / llm / tts` are properties that look up the active entry by name.
 
 `ModelConfig.display_name == f"{name} ({provider})"` is the label used in the Settings modal and per-turn metrics. `name` is the stable key used in `preferences.toml`.
 
 **Per-model `api_key`.** Cloud entries can set `api_key = "${GEMINI_API_KEY_LEGACY}"` or literal. `_expand_env()` in [config.py](voice-agent/config.py) resolves `${VAR}` refs against the current env (post-dotenv). `_validate_active_requirements` treats a model with its own key as self-sufficient — the vendor-wide `OPENAI_API_KEY` / `GEMINI_API_KEY` is only required when *some* active cloud model for that vendor doesn't have its own key.
 
 **`reasoning_effort` on LLMs.** Accepts `none | minimal | low | medium | high | xhigh`. Plumbed into the Agent via `ModelSettings(reasoning=Reasoning(effort=...))`, which the chat completions path reads as `reasoning_effort` and the Responses path reads via `reasoning.effort`. Defaults matter a lot for voice — on Gemini 3 preview flash and GPT-5, the default budget blows TTFT to ~16s; `"minimal"` drops it to ~1s. Hosted OpenAI tools require ≥ `"low"` (tool calls are part of the reasoning loop).
+
+### Runtime registry + OS filtering
+
+[voice-agent/runtimes.py](voice-agent/runtimes.py) owns the `RUNTIMES` table — one entry per local backend we know how to drive (`whispercpp`, `llamacpp`, `mlx-lm`, `mlx-vlm`, `mlx-audio`). Each `Runtime` records the roles it applies to, its `supported_os` set (e.g. `{"darwin"}` for every mlx-* entry), the pip module/package name (None for binary runtimes), and the health path `ServerManager._wait_ready` polls. Config parsing rejects unknown runtime IDs and wrong-role combos against this registry.
+
+[voice-agent/platform_info.py](voice-agent/platform_info.py) wraps OS detection: `current_os()` returns `"darwin" | "linux" | "windows" | "unknown"`, `linux_package_manager()` returns `"apt" | "dnf" | "pacman" | "zypper"` from `/etc/os-release` (with a `shutil.which` fallback), and `has_cuda()` probes `nvidia-smi`. Callers should always go through these instead of `platform.system()` directly.
+
+Catalogs are filtered against `current_os()` inside `load_settings` via `_filter_catalog_by_os`. An entry whose runtime doesn't support the running OS is dropped from the catalog the Settings modal sees. If `preferences.toml` names a dropped entry, `_resolve_active` falls back to the first surviving entry and appends a human-readable line to `Settings.fallback_notes`; `VoiceAgentApp._run_pipeline` mounts a `NoticeCard` per note after the splash dismisses, so the swap is visible. When *every* entry for a role is filtered, `_filter_catalog_by_os` raises a specific `ConfigError` telling the user to add a cloud entry.
+
+**Windows is blocked before any initialization.** `voice-agent/__main__.py` checks `current_os() == "windows"` before any other import and exits with a message pointing at [WSL2](https://learn.microsoft.com/windows/wsl/install). Don't try to make the Textual UI, setup scripts, or sounddevice path work on native Windows — WSL2 + the Linux code path covers that audience.
 
 ### Runtime switching
 
@@ -134,9 +162,9 @@ One-off details:
 
 - **mlx-audio** (TTS port 8000) takes no model at startup — the model is in each request body, so swapping between local TTS entries does not restart it.
 - **whisper-server** (STT port 9000) takes `-m <model>` at startup — swapping local STT models restarts.
-- **LLM server** (port 8080) command depends on the active LLM's `server` field (`mlx-vlm` / `mlx-lm` / `llamacpp`); swapping between local LLMs restarts. Health endpoint differs per backend (`/v1/models` for mlx-*, `/health` for llamacpp).
+- **LLM server** (port 8080) command depends on the active LLM's `runtime` field (`mlx-vlm` / `mlx-lm` / `llamacpp`); swapping between local LLMs restarts. The health path comes from the `RUNTIMES` registry (`/v1/models` for mlx-*, `/health` for llamacpp).
 
-Deps (`_ensure_whisper`, `_ensure_llm`, `_ensure_tts`) run the first time each role is started, not up front. `_apply_patches` still handles the misaki/phonemizer Kokoro quirk when the active TTS matches `"kokoro"`.
+Deps (`_ensure_whisper`, `_ensure_llm`, `_ensure_tts`) run the first time each role is started, not up front. `_ensure_llm` / `_ensure_tts` consult `RUNTIMES[runtime].pip_module` / `pip_package` to decide what (if anything) to install. `_ensure_system_deps` detects the host package manager via `platform_info.linux_package_manager()` (falls back to `brew` on macOS) and installs from the `[<model>.system]` table in `model_deps.toml`. `_apply_patches` still handles the misaki/phonemizer Kokoro quirk when the active TTS matches `"kokoro"`.
 
 ### Providers
 
@@ -283,6 +311,10 @@ uv run python -m voice-agent            # Run
 - **misaki/espeak patch.** `ServerManager._apply_patches` replaces library + data paths and deletes `.pyc` caches. Only runs for TTS roles whose active model name contains `"kokoro"`. Don't widen it blindly.
 - **Whisper model name.** In local STT, `ModelConfig.model` is a whisper.cpp model file suffix like `large-v3-turbo-q5_0` (matches `ggml-{name}.bin`), *not* an MLX path. `setup-whispercpp.sh` manages these files.
 - **`tts_voice` is optional.** Some local TTS models (chatterbox) don't take a voice. `ModelConfig.voice = None` is handled by `create_pipeline_config`.
-- **Preferences fallback.** Unknown name in `preferences.toml` warns and falls back to the first catalog entry — don't crash on it.
+- **Preferences fallback.** Two fallback paths in `_resolve_active` — an *unknown* name (not anywhere in the catalog) prints a stderr warning and picks the first entry silently; a name that *was* in the catalog but got OS-filtered appends a line to `Settings.fallback_notes` so `VoiceAgentApp._run_pipeline` can mount a `NoticeCard` for the user. Don't collapse these into one path — the user needs to know why their active model changed.
+- **`server` is renamed to `runtime`.** `ModelConfig.runtime` applies to all local entries (STT / LLM / TTS), not just LLMs. `_parse_catalog` raises a clear migration error if a catalog entry still uses the old `server` field name. When adding a new local runtime, add it to `voice-agent/runtimes.py` first — config validation and the `ServerManager` dispatch both read from the registry.
+- **Linux = cloud TTS only.** No local TTS runtime runs on Linux today (mlx-audio is Apple-Silicon-only). The catalog filter handles this automatically, but if you add a Linux-capable TTS runtime later, register it in `runtimes.py` with `supported_os={"linux", ...}` before wiring it into `ServerManager._start_tts`.
+- **Setup scripts are OS-aware.** `setup-llamacpp.sh` picks a different asset per OS/arch (and probes CUDA on Linux); `setup-whispercpp.sh` branches on `uname -s` and auto-detects the cmake install command via the system package manager. Don't hard-code `brew` or Apple-Silicon paths anywhere new — route new system-dep lookups through `model_deps.toml` under a `[<pattern>.system]` table with per-manager keys (`brew`/`apt`/`dnf`/`pacman`/`zypper`) so the existing dispatcher in `ServerManager._ensure_system_deps` handles them.
+- **`uv sync --extra local` is a no-op on Linux.** The mlx entries in `pyproject.toml` are gated with `sys_platform == 'darwin'`. Don't strip the markers; they're what lets the single `setup.sh` work on both OSes without a branch.
 - **Splash buffering.** `SplashScreen` methods (`log_line`, `set_waiting`, `set_ready`, `set_failed`) buffer until the screen is mounted, so they're safe to call from the moment the worker starts.
 - **Sentence splitter is decimal-aware.** `_eager_sentence_splitter` in `providers.py` holds back `digit + "."` at buffer-end to avoid flushing mid-decimal (which would make TTS read `3.14` as "three"). If you touch it, keep that check.

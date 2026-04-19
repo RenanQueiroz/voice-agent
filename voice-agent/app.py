@@ -177,6 +177,12 @@ class VoiceAgentApp(App[None]):
                 self.pop_screen()
                 self._splash = None
 
+            # If any active model got auto-swapped at load time (e.g. a
+            # Linux user's preferences.toml pointed at an mlx-audio TTS),
+            # surface a NoticeCard per swap so the change isn't silent.
+            for note in self.settings.fallback_notes:
+                self._mount_card(NoticeCard(note))
+
             self._set_state("listening")
 
             await run_pipeline_loops(
@@ -383,9 +389,7 @@ class VoiceAgentApp(App[None]):
     def action_reset_conversation(self) -> None:
         """Clear the chat history and all conversation cards."""
         if self.responding:
-            self._mount_card(
-                NoticeCard("Can't reset while the agent is responding.")
-            )
+            self._mount_card(NoticeCard("Can't reset while the agent is responding."))
             return
         self.run_worker(self._reset_conversation(), exclusive=False, name="reset")
 

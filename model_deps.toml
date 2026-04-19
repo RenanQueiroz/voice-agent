@@ -1,10 +1,21 @@
-# Model-specific pip dependencies.
+# Model-specific dependencies.
 # Keys are lowercase patterns matched against model names.
-# Values are lists of pip packages to install.
+# Each section may define:
+#   deps   — pip packages to install via `uv pip install`
+#   system — system packages to install via the OS package manager, keyed by
+#            manager name (brew / apt / dnf / pacman / zypper). The app
+#            detects the running OS + package manager and uses the matching
+#            list; unrecognized managers are ignored with a manual-install
+#            warning.
 
 [kokoro]
 # See: https://github.com/Blaizzy/mlx-audio/issues/648
 # misaki/phonemizer incompatibility is auto-patched at startup
 deps = ["misaki", "num2words", "spacy", "phonemizer", "espeakng-loader"]
-# System packages installed via brew (checked by binary name on PATH)
-brew = ["espeak-ng"]
+
+[kokoro.system]
+brew    = ["espeak-ng"]
+apt     = ["espeak-ng"]
+dnf     = ["espeak-ng"]
+pacman  = ["espeak-ng"]
+zypper  = ["espeak-ng"]

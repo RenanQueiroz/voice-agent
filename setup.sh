@@ -3,6 +3,11 @@
 # Usage:
 #   ./setup.sh           # Install all deps (core + local)
 #   ./setup.sh --update  # Update all deps to latest versions
+#
+# The `local` extra resolves to the mlx stack on macOS only — on Linux the
+# sys_platform marker in pyproject.toml makes it a no-op, so there's nothing
+# extra to install for local Linux runtimes (llama.cpp / whisper.cpp ship as
+# binaries via setup-llamacpp.sh / setup-whispercpp.sh).
 
 set -e
 
@@ -13,15 +18,16 @@ if ! command -v uv &> /dev/null; then
     exit 1
 fi
 
+OS_NAME=$(uname -s)
+
 if [ "$1" = "--update" ]; then
-    echo "Updating all dependencies to latest versions..."
+    echo "Updating all dependencies to latest versions ($OS_NAME)..."
     uv lock --upgrade
     uv sync --extra local
-    echo ""
-    echo "Done. Run 'uv run python -m voice-agent' to start."
 else
-    echo "Installing dependencies..."
+    echo "Installing dependencies ($OS_NAME)..."
     uv sync --extra local
-    echo ""
-    echo "Done. Run 'uv run python -m voice-agent' to start."
 fi
+
+echo ""
+echo "Done. Run 'uv run python -m voice-agent' to start."

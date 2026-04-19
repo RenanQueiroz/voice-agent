@@ -24,7 +24,9 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 
+from .platform_info import current_os
 from .preferences import load_preferences
+from .runtimes import is_runtime_supported, runtimes_for_role
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -79,7 +81,6 @@ def _get_optional(env_key: str, toml_value: Any) -> str | None:
 
 Role = Literal["stt", "llm", "tts"]
 Provider = Literal["cloud", "local"]
-LLMServer = Literal["mlx-vlm", "mlx-lm", "llamacpp"]
 Vendor = Literal["openai", "gemini"]
 
 
@@ -160,8 +161,14 @@ class ModelConfig:
     #                          rate-limited providers like Gemini TTS.
     split: str | None = None
 
-    # Local-LLM-only
-    server: LLMServer | None = None
+    # Local-only: which runtime serves this model. One of the IDs registered
+    # in `runtimes.RUNTIMES` (whispercpp for STT; llamacpp / mlx-lm / mlx-vlm
+    # for LLM; mlx-audio for TTS). Catalog parsing filters out entries whose
+    # runtime isn't supported on the current OS — mlx-* runtimes silently
+    # drop off on Linux because there are no Linux wheels for the mlx stack.
+    runtime: str | None = None
+
+    # Local-LLM-only (llamacpp preset + mlx-vlm quantization knobs)
     preset: str | None = (
         None  # llamacpp preset path (llamacpp-models.ini), relative to project root
     )
@@ -246,6 +253,11 @@ class Settings:
 
     # Shell tool (requires user approval per invocation)
     shell: ShellConfig = field(default_factory=ShellConfig)
+
+    # Notes about catalog/preference changes applied at load time (e.g. an
+    # active model filtered out on this OS). The app mounts a NoticeCard
+    # for each at startup so the user sees the swap.
+    fallback_notes: list[str] = field(default_factory=list)
 
     # ── Active-model lookups ─────────────────────────────────
 
@@ -517,49 +529,111 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                     f"but no file_search_vector_stores set."
                 )
 
-        if role == "llm" and provider == "local":
-            server = entry.get("server")
-            if server not in ("mlx-vlm", "mlx-lm", "llamacpp"):
+        if provider == "local":
+            if "server" in entry and "runtime" not in entry:
                 raise ConfigError(
-                    f"[[llm]] '{name}' must set server = 'mlx-vlm' | 'mlx-lm' | 'llamacpp' "
-                    f"(got {server!r})"
+                    f"[[{role}]] '{name}' uses the old 'server' field. Rename "
+                    "it to 'runtime' (e.g. runtime = \"llamacpp\") — the field "
+                    "now applies to STT and TTS entries too."
                 )
-            config.server = server
-            config.audio_input = bool(entry.get("audio_input", False))
-            kv_bits = entry.get("kv_bits")
-            config.kv_bits = str(kv_bits) if kv_bits is not None else None
-            kv_scheme = entry.get("kv_quant_scheme")
-            config.kv_quant_scheme = str(kv_scheme) if kv_scheme is not None else None
-            preset = entry.get("preset")
-            if server == "llamacpp":
-                if not preset or not isinstance(preset, str):
-                    raise ConfigError(
-                        f"[[llm]] '{name}' (server=llamacpp) needs a 'preset' "
-                        f"path, e.g. preset = 'llamacpp-models.ini'"
-                    )
-                preset_path = _PROJECT_ROOT / preset
-                if not preset_path.exists():
-                    raise ConfigError(
-                        f"[[llm]] '{name}' preset file not found: {preset_path}. "
-                        "Copy llamacpp-models.ini.example to llamacpp-models.ini "
-                        "and customize it."
-                    )
-                config.preset = preset
+            runtime = entry.get("runtime")
+            allowed = runtimes_for_role(role)
+            if not runtime or runtime not in allowed:
+                raise ConfigError(
+                    f"[[{role}]] '{name}' must set runtime to one of "
+                    f"{allowed} (got {runtime!r})."
+                )
+            config.runtime = runtime
+
+            if role == "llm":
+                config.audio_input = bool(entry.get("audio_input", False))
+                kv_bits = entry.get("kv_bits")
+                config.kv_bits = str(kv_bits) if kv_bits is not None else None
+                kv_scheme = entry.get("kv_quant_scheme")
+                config.kv_quant_scheme = (
+                    str(kv_scheme) if kv_scheme is not None else None
+                )
+                preset = entry.get("preset")
+                if runtime == "llamacpp":
+                    if not preset or not isinstance(preset, str):
+                        raise ConfigError(
+                            f"[[llm]] '{name}' (runtime=llamacpp) needs a "
+                            f"'preset' path, e.g. preset = 'llamacpp-models.ini'"
+                        )
+                    preset_path = _PROJECT_ROOT / preset
+                    if not preset_path.exists():
+                        raise ConfigError(
+                            f"[[llm]] '{name}' preset file not found: "
+                            f"{preset_path}. Copy llamacpp-models.ini.example "
+                            "to llamacpp-models.ini and customize it."
+                        )
+                    config.preset = preset
 
         models.append(config)
     return models
 
 
-def _resolve_active(role: Role, pref: str | None, catalog: list[ModelConfig]) -> str:
+def _filter_catalog_by_os(
+    role: Role,
+    catalog: list[ModelConfig],
+    os_tag: str,
+) -> tuple[list[ModelConfig], list[ModelConfig]]:
+    """Split a catalog into (compatible, dropped) for `os_tag`.
+
+    Cloud entries are always compatible. Local entries survive only when
+    their `runtime` runs on the current OS (see `runtimes.RUNTIMES`).
+    """
+    compatible: list[ModelConfig] = []
+    dropped: list[ModelConfig] = []
+    for m in catalog:
+        if m.provider == "cloud":
+            compatible.append(m)
+            continue
+        if m.runtime and is_runtime_supported(m.runtime, os_tag):
+            compatible.append(m)
+        else:
+            dropped.append(m)
+    if not compatible:
+        # Every entry for this role was filtered out — preserve the startup
+        # error but make the cause clear.
+        names = [f"{m.name} ({m.runtime})" for m in dropped]
+        raise ConfigError(
+            f"No compatible [[{role}]] entries on {os_tag}: all catalog "
+            f"entries use runtimes that don't support this OS ({names}). "
+            "Add a cloud entry (or a runtime that supports this OS) to "
+            "models.toml."
+        )
+    return compatible, dropped
+
+
+def _resolve_active(
+    role: Role,
+    pref: str | None,
+    catalog: list[ModelConfig],
+    dropped: list[ModelConfig],
+    notes: list[str],
+) -> str:
+    """Pick the active model name, recording a note if a user preference got
+    filtered out because it's not supported on the current OS."""
     if pref:
         for m in catalog:
             if m.name == pref:
                 return pref
-        print(
-            f"Warning: preferences.toml active {role} '{pref}' not found in "
-            f"catalog; falling back to '{catalog[0].name}'.",
-            file=sys.stderr,
-        )
+        dropped_match = next((m for m in dropped if m.name == pref), None)
+        fallback = catalog[0].name
+        if dropped_match is not None:
+            notes.append(
+                f"{role.upper()}: switched from '{pref}' to '{fallback}' — "
+                f"the '{dropped_match.runtime}' runtime is not supported on "
+                "this operating system."
+            )
+        else:
+            print(
+                f"Warning: preferences.toml active {role} '{pref}' not found "
+                f"in catalog; falling back to '{fallback}'.",
+                file=sys.stderr,
+            )
+        return fallback
     return catalog[0].name
 
 
@@ -592,14 +666,25 @@ def load_settings() -> Settings:
     shell_cfg = t.get("shell", {})
 
     models_toml = _load_models_toml()
-    stt_models = _parse_catalog("stt", list(models_toml.get("stt", [])))
-    llm_models = _parse_catalog("llm", list(models_toml.get("llm", [])))
-    tts_models = _parse_catalog("tts", list(models_toml.get("tts", [])))
+    os_tag = current_os()
+    stt_models_all = _parse_catalog("stt", list(models_toml.get("stt", [])))
+    llm_models_all = _parse_catalog("llm", list(models_toml.get("llm", [])))
+    tts_models_all = _parse_catalog("tts", list(models_toml.get("tts", [])))
+    stt_models, stt_dropped = _filter_catalog_by_os("stt", stt_models_all, os_tag)
+    llm_models, llm_dropped = _filter_catalog_by_os("llm", llm_models_all, os_tag)
+    tts_models, tts_dropped = _filter_catalog_by_os("tts", tts_models_all, os_tag)
 
     prefs = load_preferences()
-    active_stt = _resolve_active("stt", prefs.get("stt"), stt_models)
-    active_llm = _resolve_active("llm", prefs.get("llm"), llm_models)
-    active_tts = _resolve_active("tts", prefs.get("tts"), tts_models)
+    fallback_notes: list[str] = []
+    active_stt = _resolve_active(
+        "stt", prefs.get("stt"), stt_models, stt_dropped, fallback_notes
+    )
+    active_llm = _resolve_active(
+        "llm", prefs.get("llm"), llm_models, llm_dropped, fallback_notes
+    )
+    active_tts = _resolve_active(
+        "tts", prefs.get("tts"), tts_models, tts_dropped, fallback_notes
+    )
 
     settings = Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
@@ -628,6 +713,7 @@ def load_settings() -> Settings:
         model_instruction_snippets={
             str(k): str(v) for k, v in agent.get("model-instructions", {}).items()
         },
+        fallback_notes=fallback_notes,
         shell=ShellConfig(
             enabled=bool(
                 str(

@@ -1,6 +1,8 @@
 # Voice Agent
 
-A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). It uses a 3-model pipeline (STT, LLM, TTS) where each role can be cloud (OpenAI API) or local (MLX on Apple Silicon / whisper.cpp / llama.cpp) independently. The terminal UI is a fullscreen Textual app with clickable controls and flicker-free streaming.
+A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). It uses a 3-model pipeline (STT, LLM, TTS) where each role can be cloud (OpenAI API / Gemini) or local (whisper.cpp / llama.cpp / MLX on Apple Silicon) independently. The terminal UI is a fullscreen Textual app with clickable controls and flicker-free streaming.
+
+Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cloud role; MLX is Apple-Silicon-only and is filtered out of the catalog on Linux). On **Windows** run the app through [WSL2](https://learn.microsoft.com/windows/wsl/install).
 
 ## Features
 
@@ -18,16 +20,21 @@ A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https:
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
-- **Auto-setup for local roles**: installs Python deps, brew deps, builds whisper.cpp, downloads the LLM binary, and patches known compatibility issues.
+- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), downloads the matching llama.cpp binary for the host platform, and patches known compatibility issues.
+- **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-lm` / `mlx-vlm` / `mlx-audio`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
 - **Per-turn metrics**: STT, LLM (with TTFT), TTS, and total timing inline with each turn.
 
 ## Prerequisites
 
-- **macOS** with Apple Silicon (M1/M2/M3/M4) for local roles
+- **Operating system**:
+  - **macOS** on Apple Silicon (M1/M2/M3/M4) — all local runtimes available.
+  - **Linux** (x86_64 or aarch64) — `whispercpp` (STT) and `llamacpp` (LLM) for local roles; MLX-backed entries are filtered out since the `mlx` package has no Linux wheels. Local TTS is not supported on Linux today — pair a local STT/LLM with a cloud TTS (OpenAI or Gemini), or run everything cloud.
+  - **Windows**: not supported natively — install [WSL2](https://learn.microsoft.com/windows/wsl/install) and run the app from a Linux shell.
 - **Python 3.14+**
-- **[uv](https://docs.astral.sh/uv/)** package manager
-- **espeak-ng** (auto-installed via Homebrew for Kokoro TTS)
-- An **OpenAI API key** for any cloud role
+- **[uv](https://docs.astral.sh/uv/)** package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
+- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON` and `setup-llamacpp.sh` downloads the CUDA-enabled llama.cpp asset.
+- An **OpenAI** and/or **Gemini API key** for any cloud role.
 
 ## Quick start
 
@@ -81,7 +88,7 @@ Config lives in three files at the project root:
 | `preferences.toml`      | Active model name per role; auto-written by the Settings modal                  | ❌          |
 | `.env`                  | Secrets (`OPENAI_API_KEY`, `GEMINI_API_KEY`, any `api_key = "${VAR}"` targets)  | ❌          |
 | `mcp_servers.toml`      | MCP server definitions                                                          | ❌          |
-| `llamacpp-models.ini`   | llama-server preset (only when any LLM uses `server = "llamacpp"`)              | ❌          |
+| `llamacpp-models.ini`   | llama-server preset (only when any LLM uses `runtime = "llamacpp"`)             | ❌          |
 
 Environment variables override `.env`, which overrides `config.toml`.
 
@@ -92,9 +99,11 @@ Environment variables override `.env`, which overrides `config.toml`.
 enable_mcp = true                  # load MCP servers from mcp_servers.toml
 
 [local]                            # only consulted for roles whose active model is local
-stt_url = "http://localhost:9000"  # whisper-server
-tts_url = "http://localhost:8000"  # mlx-audio
-llm_url = "http://localhost:8080"  # mlx-vlm / mlx-lm / llama-server
+# Each URL is served by whichever runtime is active for that role. The app
+# filters runtimes by OS, so only the ones you need ever get consulted.
+stt_url = "http://localhost:9000"  # whispercpp          (darwin + linux)
+tts_url = "http://localhost:8000"  # mlx-audio           (darwin only)
+llm_url = "http://localhost:8080"  # llamacpp / mlx-lm / mlx-vlm   (llamacpp: darwin+linux; mlx-*: darwin only)
 
 [vad]
 threshold  = 0.5                   # Silero speech probability threshold (0-1)
@@ -122,12 +131,27 @@ The per-role model lists live in `models.toml` and are combined at launch
 with the `[local]` server URLs from `config.toml`. The `(local)` / `(cloud)`
 suffix is added automatically from `provider` — don't include it in `name`.
 
+Local entries must declare a `runtime`; allowed values per role:
+
+| Role | Runtime       | OS support        |
+|------|---------------|-------------------|
+| stt  | `whispercpp`  | darwin, linux     |
+| llm  | `llamacpp`    | darwin, linux     |
+| llm  | `mlx-lm`      | darwin only       |
+| llm  | `mlx-vlm`     | darwin only       |
+| tts  | `mlx-audio`   | darwin only       |
+
+Entries whose runtime doesn't run on the current OS are dropped from the
+catalog at startup, and if `preferences.toml` points at a dropped entry
+the app auto-falls back to the first compatible one.
+
 ```toml
 # ── STT catalog ─────────────────────────────────────
 # First entry is the default when preferences.toml is absent.
 [[stt]]
 name     = "whisper-turbo"
 provider = "local"
+runtime  = "whispercpp"
 model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix
 
 [[stt]]
@@ -139,7 +163,7 @@ model    = "gpt-4o-transcribe"
 [[llm]]
 name        = "gemma-4-e4b-it (llamacpp)"
 provider    = "local"
-server      = "llamacpp"                # "mlx-vlm" | "mlx-lm" | "llamacpp"
+runtime     = "llamacpp"                # "llamacpp" | "mlx-lm" | "mlx-vlm"
 model       = "gemma-4-e4b-it"          # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 audio_input = true                      # pass mic audio straight to the LLM (local-STT + local-LLM only)
@@ -147,7 +171,7 @@ audio_input = true                      # pass mic audio straight to the LLM (lo
 [[llm]]
 name            = "gemma-4-e4b-it (mlx-vlm)"
 provider        = "local"
-server          = "mlx-vlm"
+runtime         = "mlx-vlm"
 model           = "mlx-community/gemma-4-e4b-it-4bit"
 audio_input     = true
 kv_bits         = 3.5                   # mlx-vlm only
@@ -176,17 +200,21 @@ reasoning_effort = "minimal"            # otherwise TTFT is ~16s on Gemini 3 pre
 api_key          = "${GEMINI_API_KEY_LEGACY}"
 
 # ── TTS catalog ─────────────────────────────────────
+# NOTE: No local TTS runtime is available on Linux today. Stick to cloud
+# TTS entries on Linux, or pair a local STT/LLM with cloud TTS.
 [[tts]]
 name     = "kokoro"
 provider = "local"
+runtime  = "mlx-audio"
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
 
-# Voice cloning with CSM (local only). Both fields required together.
+# Voice cloning with CSM (local only, mlx-audio). Both fields required together.
 # `ref_audio` is resolved relative to the project root.
 [[tts]]
 name      = "csm-my-voice"
 provider  = "local"
+runtime   = "mlx-audio"
 model     = "mlx-community/csm-1b-8bit"
 ref_audio = "voices/my-voice.wav"
 ref_text  = "This is what my voice sounds like."
@@ -233,7 +261,7 @@ llm = "gpt-5.4-mini"
 tts = "kokoro"
 ```
 
-Each value matches the `name` field of an entry in the `config.toml` catalog (without the `(cloud)` / `(local)` suffix — that's added automatically for display). Missing or unknown names fall back to the first catalog entry and print a warning at startup. Copy `preferences.toml.example` to get started.
+Each value matches the `name` field of an entry in `models.toml` (without the `(cloud)` / `(local)` suffix — that's added automatically for display). Missing or unknown names fall back to the first catalog entry and print a warning at startup. Names that *do* exist in the catalog but use a runtime that doesn't support the current OS (e.g. `kokoro` on Linux) fall back to the first compatible entry and mount an inline notice so the swap is visible. Copy `preferences.toml.example` to get started.
 
 ### .env
 
@@ -245,12 +273,18 @@ Any `config.toml` scalar can be overridden via an env var — e.g. `STT_URL=http
 
 ### model_deps.toml
 
-Maps model-name patterns to pip/brew deps. Matching deps are auto-installed the first time that role is started.
+Maps model-name patterns to pip deps + per-package-manager system deps. Matching deps are auto-installed the first time that role is started; system packages use the OS-detected manager (brew on macOS; apt/dnf/pacman/zypper on Linux).
 
 ```toml
 [kokoro]
 deps = ["misaki", "num2words", "spacy", "phonemizer", "espeakng-loader"]
-brew = ["espeak-ng"]
+
+[kokoro.system]
+brew   = ["espeak-ng"]
+apt    = ["espeak-ng"]
+dnf    = ["espeak-ng"]
+pacman = ["espeak-ng"]
+zypper = ["espeak-ng"]
 ```
 
 ## Runtime model switching
@@ -391,16 +425,16 @@ On an API error the tail of the relevant log is rendered as an inline card.
 
 ### Local-server topology
 
-Each local role has exactly one backing process, started on demand:
+Each local role has exactly one backing process, started on demand, selected by the active model's `runtime`:
 
-- **whisper-server** (STT, port 9000) — whisper.cpp HTTP server with built-in VAD. Restarted when you pick a different local STT model.
-- **mlx-audio** (TTS, port 8000) — model-agnostic; the TTS model is specified per request, so swapping between local TTS models does **not** require a restart.
+- **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server with built-in VAD. Runs on macOS and Linux. Restarted when you pick a different local STT model.
+- **mlx-audio** (TTS, port 8000) — `runtime = "mlx-audio"`. macOS-only. Model-agnostic; the TTS model is specified per request, so swapping between local TTS models does **not** require a restart.
 - **LLM server** (port 8080) — backend is per-entry:
-  - `mlx-vlm` — Python module, supports `--kv-bits` / `--kv-quant-scheme`, health via `/v1/models`
-  - `mlx-lm` — Python module, health via `/v1/models`
-  - `llamacpp` — `llama-server` binary, health via `/health`, models from the preset file
+  - `runtime = "llamacpp"` — `llama-server` binary, health via `/health`, models from the preset file. Runs on macOS and Linux.
+  - `runtime = "mlx-lm"` — Python module, health via `/v1/models`. macOS-only.
+  - `runtime = "mlx-vlm"` — Python module, supports `--kv-bits` / `--kv-quant-scheme`, health via `/v1/models`. macOS-only.
 
-The reconciler restarts the LLM server when you pick a different local LLM (different model or backend).
+The reconciler restarts the LLM server when you pick a different local LLM (different model or runtime).
 
 ### VAD tuning
 
@@ -415,4 +449,4 @@ If you delete a local model or change its file layout, the next time that local 
 
 ### Missing dependencies
 
-`model_deps.toml` maps patterns in the model name to pip/brew deps. The first time you start a role that matches, the deps install automatically. Add new entries there as needed.
+`model_deps.toml` maps patterns in the model name to pip deps + per-package-manager system deps. The first time you start a role that matches, the deps install automatically (pip via `uv pip install`; system packages via `brew`/`apt-get`/`dnf`/`pacman`/`zypper` depending on the host). Add new entries there as needed; for a new system dep, include one key per supported package manager under the `[<pattern>.system]` table.

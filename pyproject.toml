@@ -12,15 +12,20 @@ dependencies = [
     "rich>=15.0.0",
     "sounddevice>=0.5",
     "onnxruntime>=1.16.1",
-    "webrtcvad-wheels>=2.0.14",
     "textual>=1.0.0",
 ]
 
 [project.optional-dependencies]
+# The mlx stack is Apple-Silicon-only — the `mlx` package has no Linux
+# wheels, which would make `uv sync --extra local` fail on Linux without
+# these platform markers. On Linux the extra resolves to an empty list,
+# which is correct: llama.cpp and whisper.cpp ship as binaries managed by
+# setup-llamacpp.sh / setup-whispercpp.sh, not pip packages, and there's
+# no supported local TTS runtime on Linux today (cloud TTS only).
 local = [
-    "mlx-audio[server,tts,stt]",
-    "mlx-lm",
-    "mlx-vlm",
+    "mlx-audio[server,tts,stt]; sys_platform == 'darwin'",
+    "mlx-lm;                    sys_platform == 'darwin'",
+    "mlx-vlm;                   sys_platform == 'darwin'",
 ]
 
 [dependency-groups]

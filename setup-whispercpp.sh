@@ -1,8 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Builds whisper.cpp from source (with Metal acceleration) and downloads
-# the specified GGML model plus the Silero VAD model into ./whispercpp/.
+# Builds whisper.cpp from source and downloads the specified GGML model
+# plus the Silero VAD model into ./whispercpp/.
+#
+# GPU acceleration:
+#   macOS   → Metal (auto-enabled by whisper.cpp's cmake).
+#   Linux   → CUDA if `nvidia-smi` is present (`-DGGML_CUDA=ON`), else CPU.
 #
 # Usage:
 #   ./setup-whispercpp.sh [model-name]
@@ -30,6 +34,49 @@ SUPPORTED_MODELS=(
     large-v3 large-v3-q5_0 large-v3-turbo large-v3-turbo-q5_0
 )
 
+OS_NAME="$(uname -s)"
+
+# --- Install cmake if missing ---
+
+install_cmake() {
+    case "$OS_NAME" in
+        Darwin)
+            if ! command -v brew &> /dev/null; then
+                echo "Error: cmake is required but neither cmake nor Homebrew are installed." >&2
+                echo "Install cmake manually: https://cmake.org/download/" >&2
+                exit 1
+            fi
+            echo "cmake not found, installing via Homebrew..."
+            brew install cmake > /dev/null 2>&1
+            ;;
+        Linux)
+            if command -v apt-get &> /dev/null; then
+                echo "cmake not found, installing via apt..."
+                sudo apt-get update -qq
+                sudo apt-get install -y cmake
+            elif command -v dnf &> /dev/null; then
+                echo "cmake not found, installing via dnf..."
+                sudo dnf install -y cmake
+            elif command -v pacman &> /dev/null; then
+                echo "cmake not found, installing via pacman..."
+                sudo pacman -S --noconfirm cmake
+            elif command -v zypper &> /dev/null; then
+                echo "cmake not found, installing via zypper..."
+                sudo zypper install -y cmake
+            else
+                echo "Error: cmake is required but no supported package manager was found." >&2
+                echo "Install cmake manually: https://cmake.org/download/" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Error: cmake is required but this script doesn't know how to install it on $OS_NAME." >&2
+            exit 1
+            ;;
+    esac
+    echo "cmake installed."
+}
+
 # --- Validate model name ---
 
 valid=0
@@ -53,16 +100,8 @@ if [ -f "$INSTALL_DIR/whisper-server" ]; then
 else
     echo "Building whisper.cpp..."
 
-    # Ensure cmake is available
     if ! command -v cmake &> /dev/null; then
-        echo "cmake not found, installing via Homebrew..."
-        if ! command -v brew &> /dev/null; then
-            echo "Error: cmake is required but neither cmake nor Homebrew are installed." >&2
-            echo "Install cmake manually: https://cmake.org/download/" >&2
-            exit 1
-        fi
-        brew install cmake > /dev/null 2>&1
-        echo "cmake installed."
+        install_cmake
     fi
 
     if [ -d "$SRC_DIR/.git" ]; then
@@ -74,9 +113,18 @@ else
         git clone --depth 1 "$REPO" "$SRC_DIR"
     fi
 
-    # Metal is enabled by default on macOS (GPU acceleration on Apple Silicon)
-    echo "Compiling with Metal support..."
-    cmake -B "$SRC_DIR/build" -S "$SRC_DIR" -DCMAKE_BUILD_TYPE=Release
+    CMAKE_FLAGS=(-DCMAKE_BUILD_TYPE=Release)
+    if [ "$OS_NAME" = "Linux" ] && command -v nvidia-smi &> /dev/null && nvidia-smi -L &> /dev/null; then
+        echo "Compiling with CUDA support (nvidia-smi detected)..."
+        CMAKE_FLAGS+=(-DGGML_CUDA=ON)
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        # Metal is enabled by default on macOS (GPU acceleration on Apple Silicon).
+        echo "Compiling with Metal support..."
+    else
+        echo "Compiling CPU-only build..."
+    fi
+
+    cmake -B "$SRC_DIR/build" -S "$SRC_DIR" "${CMAKE_FLAGS[@]}"
     cmake --build "$SRC_DIR/build" -j --config Release
 
     echo "Copying binaries..."

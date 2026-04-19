@@ -2,12 +2,20 @@
 enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 
 # ── Local server endpoints ────────────────────────────────
-# Only consulted for roles whose active model is local. You can leave these
-# even if you're using cloud models — they're lazy-validated.
+# Per-role local server URLs. Only consulted for roles whose active model
+# is local — lazy-validated, so it's fine to leave these set even when
+# you're running a cloud-only stack.
+#
+# Each URL is served by whichever runtime is active for that role:
+#   stt_url — whispercpp (whisper-server)            [darwin, linux]
+#   llm_url — llamacpp, mlx-lm, mlx-vlm              [llamacpp: darwin+linux; mlx-*: darwin-only]
+#   tts_url — mlx-audio                              [darwin-only]
+# Runtimes that don't support the current OS are filtered out of the
+# model catalog at startup, so only the URLs you need are ever consulted.
 [local]
-stt_url = "http://localhost:9000"  # whisper-server
-tts_url = "http://localhost:8000"  # mlx-audio
-llm_url = "http://localhost:8080"  # mlx-vlm / mlx-lm / llama-server
+stt_url = "http://localhost:9000"
+tts_url = "http://localhost:8000"
+llm_url = "http://localhost:8080"
 
 # ── Model catalogs ────────────────────────────────────────
 # The per-role model lists ([[stt]] / [[llm]] / [[tts]]) live in `models.toml`.
