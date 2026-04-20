@@ -22,5 +22,11 @@ whispercpp/
 # llama.cpp model preset (user-specific, like .env)
 llamacpp-models.ini
 
+# Kokoro-fastapi
+kokoro-fastapi/
+
+# Qwen3 TTS
+qwen3-tts/
+
 # Active model selections (user-specific, written by the Switch modal)
 preferences.toml
