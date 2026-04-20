@@ -395,6 +395,106 @@ if patch_file(
     marker='env_model = os.environ.get("QWEN3_DEFAULT_MODEL")',
 ):
     print("Patched optimized_backend.py: _default_model_key honors QWEN3_DEFAULT_MODEL")
+
+# 5. optimized_backend.py — populate self._voice_prompt_cache with the
+# real speaker embeddings for every voice library profile at the end
+# of _warmup_base_model. Without this, the first real clone request
+# builds its own prompt from the 1 s dummy sine embedding left over
+# from Warmup 1-3 and sounds like a different speaker — the user
+# reports first turn sounds off, second turn sounds like the cloned
+# voice. We avoid running an extra `stream_generate_voice_clone`
+# pass because that would fire ANOTHER max-autotune compile (5-6
+# min on a cold inductor cache, on top of Warmup 3/3's own cold
+# compile), doubling startup. The first real request will still
+# hit one decoder recompile for the new (ref_code, text) shape —
+# TORCHINDUCTOR_CACHE_DIR persists across boots so that cost is
+# paid exactly once per host.
+if patch_file(
+    "api/backends/optimized_backend.py",
+    (
+        "        logger.info(\"Warmup 3/3: Base — GPU power stabilisation…\")\n"
+        "        for _ in self.model.stream_generate_voice_clone(\n"
+        "            text=\"Third pass to stabilise GPU power state.\",\n"
+        "            language=\"English\",\n"
+        "            ref_audio=(dummy_audio, 24000),\n"
+        "            x_vector_only_mode=True,\n"
+        "            emit_every_frames=emit_every,\n"
+        "            decode_window_frames=decode_window,\n"
+        "        ):\n"
+        "            pass\n"
+        "        logger.info(\"Warmup complete (base)\")"
+    ),
+    (
+        "        logger.info(\"Warmup 3/3: Base — GPU power stabilisation…\")\n"
+        "        for _ in self.model.stream_generate_voice_clone(\n"
+        "            text=\"Third pass to stabilise GPU power state.\",\n"
+        "            language=\"English\",\n"
+        "            ref_audio=(dummy_audio, 24000),\n"
+        "            x_vector_only_mode=True,\n"
+        "            emit_every_frames=emit_every,\n"
+        "            decode_window_frames=decode_window,\n"
+        "        ):\n"
+        "            pass\n"
+        "\n"
+        "        # Pre-build voice library clone prompts so the first real clone\n"
+        "        # request uses a speaker embedding computed from the real\n"
+        "        # ref_audio, not the 1 s dummy sine used in Warmup 1-3. Fast\n"
+        "        # (<1 s per profile); we deliberately skip an extra\n"
+        "        # stream_generate pass (which would trigger another slow\n"
+        "        # max-autotune compile).\n"
+        "        try:\n"
+        "            import json as _json\n"
+        "            import soundfile as _sf\n"
+        "            voice_lib_env = os.environ.get(\"VOICE_LIBRARY_DIR\", \"./voice_library\")\n"
+        "            profiles_dir = Path(voice_lib_env).resolve() / \"profiles\"\n"
+        "            if profiles_dir.exists():\n"
+        "                for child in sorted(profiles_dir.iterdir()):\n"
+        "                    if not child.is_dir():\n"
+        "                        continue\n"
+        "                    meta_path = child / \"meta.json\"\n"
+        "                    if not meta_path.exists():\n"
+        "                        continue\n"
+        "                    try:\n"
+        "                        meta = _json.loads(meta_path.read_text(encoding=\"utf-8\"))\n"
+        "                    except Exception:\n"
+        "                        continue\n"
+        "                    ref_filename = meta.get(\"ref_audio_filename\", \"\")\n"
+        "                    ref_path = child / ref_filename if ref_filename else None\n"
+        "                    if ref_path is None or not ref_path.exists():\n"
+        "                        continue\n"
+        "                    name = meta.get(\"name\", child.name)\n"
+        "                    ref_text = meta.get(\"ref_text\", \"\")\n"
+        "                    xvo = bool(meta.get(\"x_vector_only_mode\", False))\n"
+        "                    if not xvo and not ref_text:\n"
+        "                        continue\n"
+        "                    try:\n"
+        "                        audio_np, audio_sr = _sf.read(str(ref_path))\n"
+        "                        if len(audio_np.shape) > 1:\n"
+        "                            audio_np = audio_np.mean(axis=1)\n"
+        "                        audio_np = audio_np.astype(np.float32)\n"
+        "                        cache_key = str(name).lower()\n"
+        "                        prompt_items = self.model.create_voice_clone_prompt(\n"
+        "                            ref_audio=(audio_np, audio_sr),\n"
+        "                            ref_text=ref_text or None,\n"
+        "                            x_vector_only_mode=xvo,\n"
+        "                        )\n"
+        "                        self._voice_prompt_cache[cache_key] = prompt_items\n"
+        "                        logger.info(\n"
+        "                            f\"Voice library prompt cached: '{name}' \"\n"
+        "                            f\"(key='{cache_key}', x_vector_only={xvo})\"\n"
+        "                        )\n"
+        "                    except Exception as exc:\n"
+        "                        logger.warning(\n"
+        "                            f\"Voice library: skip '{name}' ({exc})\"\n"
+        "                        )\n"
+        "                        continue\n"
+        "        except Exception as exc:\n"
+        "            logger.warning(f\"Voice library prompt-cache skipped: {exc}\")\n"
+        "        logger.info(\"Warmup complete (base)\")"
+    ),
+    marker="Voice library prompt cached",
+):
+    print("Patched optimized_backend.py: pre-cache voice library prompts in _warmup_base_model")
 PY
 }
 export INSTALL_DIR  # consumed by the heredoc above

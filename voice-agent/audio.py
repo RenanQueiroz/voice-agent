@@ -203,7 +203,23 @@ class AudioPlayer:
         """Stop playback immediately (called from outside on interruption)."""
         self._stopped = True
         if self._player and not self._player.closed:
-            self._player.stop()
+            # abort() — NOT stop(). Two reasons:
+            #  * stop() waits for buffered audio to play out, which is
+            #    the opposite of what we want on interrupt.
+            #  * play() is awaiting run_in_executor(self._player.write,
+            #    …) at this moment. stop() is not spec'd thread-safe
+            #    against an in-progress write(); on ALSA→PulseAudio
+            #    (WSLg, pipewire pulse-compat) it leaves the plugin
+            #    in a partially-torn-down state, and the next
+            #    OutputStream() raises "pulse_prepare: Unable to
+            #    create stream: Bad state" + pthread-mutex assertion
+            #    failures. abort() is the one call PortAudio spec's
+            #    as thread-safe mid-write — it unblocks the executor
+            #    thread so play()'s finally can close() cleanly.
+            try:
+                self._player.abort()
+            except Exception:
+                pass
 
     async def play(self, result, display: Display) -> tuple[float, float]:
         """Stream TTS audio to speakers.
@@ -235,6 +251,8 @@ class AudioPlayer:
             blocksize=4800,  # 200 ms at 24 kHz
         )
         stream_started = False
+        stream_start_mono = 0.0
+        total_audio_seconds = 0.0
         tts_start = time.monotonic()
         first_byte_time = 0.0
         try:
@@ -254,6 +272,13 @@ class AudioPlayer:
                             # stream underrun.
                             self._player.start()
                             stream_started = True
+                            stream_start_mono = time.monotonic()
+                        # Track how much audio we've queued so we can
+                        # compute "true playback done" below without
+                        # relying on PortAudio/PulseAudio drain semantics.
+                        # event.data is an int16 sample array, so one
+                        # element == one sample.
+                        total_audio_seconds += len(event.data) / 24000
                         await asyncio.get_event_loop().run_in_executor(
                             None, self._player.write, event.data
                         )
@@ -275,9 +300,71 @@ class AudioPlayer:
                 # than mislabeling every Gemini 503 / auth failure as "TTS".
                 display.api_error(str(e))
         finally:
+            if stream_started and self._stopped:
+                # Interrupt path: external stop() already called abort()
+                # to unblock the run_in_executor write() thread. Give
+                # that thread a tick to actually return from PortAudio
+                # before we close — close() is not safe to call while
+                # another thread is still inside write(). abort() is
+                # synchronous in libportaudio (<1 ms), so 50 ms is
+                # generous.
+                await asyncio.sleep(0.05)
+            elif stream_started:
+                # Graceful end-of-turn drain. Wait for the audio we
+                # queued to actually reach the speaker before we close.
+                # Without this:
+                #   (1) The tail of the last sentence clips — close()
+                #       discards PortAudio ring + PulseAudio buffer
+                #       content that hadn't played yet.
+                #   (2) play() returns while audio is still playing, so
+                #       pipeline.py unmutes the mic on the same tick
+                #       and the TTS tail bleeds back in through the
+                #       microphone as self-echo.
+                #
+                # Three components contribute to the drain:
+                #
+                #   * (total_audio_seconds - elapsed) — how much audio
+                #     is queued in PortAudio's ring past what's been
+                #     consumed. Naturally scales with how far ahead the
+                #     TTS producer got (~buffer depth for fast-RTF
+                #     backends like Qwen3, ~0 for realtime-paced ones
+                #     like kokoro).
+                #
+                #   * `startup_delay` — sd.OutputStream.start() returns
+                #     before the first callback fires; audio doesn't
+                #     actually start flowing until roughly one blocksize
+                #     later. `elapsed` (measured from start()) therefore
+                #     overestimates playback progress by this amount, so
+                #     we add it back to the drain.
+                #
+                #   * `pulse_cushion` — PulseAudio's own downstream
+                #     buffer on ALSA→PulseAudio paths (WSLg, pipewire
+                #     pulse-compat), which PortAudio doesn't see. Under
+                #     system load this jitters, which is why earlier
+                #     tighter values showed "sometimes too early,
+                #     sometimes too late" — we err toward slightly late.
+                #
+                # Skipped on explicit interrupt (see above branch).
+                elapsed = time.monotonic() - stream_start_mono
+                startup_delay = 4800 / 24000  # blocksize / sample_rate
+                pulse_cushion = 0.3
+                drain_seconds = (
+                    (total_audio_seconds - elapsed)
+                    + startup_delay
+                    + pulse_cushion
+                )
+                if drain_seconds > 0:
+                    await asyncio.sleep(drain_seconds)
+
             if not self._player.closed:
-                if stream_started:
-                    self._player.stop()
-                self._player.close()
+                if stream_started and not self._stopped:
+                    try:
+                        self._player.stop()
+                    except Exception:
+                        pass
+                try:
+                    self._player.close()
+                except Exception:
+                    pass
             self._player = None
         return time.monotonic() - tts_start, first_byte_time

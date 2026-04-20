@@ -592,6 +592,14 @@ class VoiceAgentApp(App[None]):
     def muted(self) -> None:
         self.is_muted = True
         self.muted_ui()
+        # End-of-turn path: the agent just finished responding while the
+        # mic was muted. Mirror `listening()`'s interrupt-hide behavior —
+        # without this, the Interrupt button stays visible after the
+        # model stops talking if the user muted mid-response (muted_ui()
+        # alone doesn't touch the button, so the mid-turn toggle works,
+        # but the end-of-turn call needs to clean up).
+        self.responding = False
+        self._set_interrupt_enabled(False)
 
     def unmuted(self) -> None:
         self.is_muted = False
