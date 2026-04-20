@@ -131,6 +131,17 @@ class ModelConfig:
     ref_audio: str | None = None
     ref_text: str | None = None
 
+    # Local-TTS-only, qwen3-tts runtime: which Qwen3-TTS model variant the
+    # server should load at boot. Qwen3's optimized backend can only have one
+    # variant resident at a time — CustomVoice for preset voices (Vivian,
+    # Sohee, …) OR Base for voice cloning via the `clone:ProfileName` voice
+    # prefix. Switching between a CustomVoice and a Base catalog entry
+    # therefore restarts the server (incl. the ~75 s torch.compile). Known
+    # values from `qwen3-tts/config.yaml`: "0.6B-CustomVoice" | "0.6B-Base" |
+    # "1.7B-CustomVoice" | "1.7B-Base". When unset, defaults to whatever the
+    # config file has (currently 0.6B-CustomVoice).
+    model_variant: str | None = None
+
     # Local-TTS-only: seconds of audio mlx-audio buffers before emitting each
     # streaming chunk. Lower = earlier first-byte (good on paper) but in
     # practice <2.0 caused stuttering for us, so providers.py defaults to
@@ -464,6 +475,38 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                         f"'sentence' / 'paragraph' / 'full', got {split!r}"
                     )
                 config.split = split
+
+            model_variant = entry.get("model_variant")
+            if model_variant is not None:
+                allowed_variants = {
+                    "0.6B-CustomVoice",
+                    "0.6B-Base",
+                    "1.7B-CustomVoice",
+                    "1.7B-Base",
+                }
+                if provider != "local" or entry.get("runtime") != "qwen3-tts":
+                    raise ConfigError(
+                        f"[[tts]] '{name}' has model_variant but that field "
+                        "only applies to local entries with "
+                        "runtime = 'qwen3-tts'."
+                    )
+                if model_variant not in allowed_variants:
+                    raise ConfigError(
+                        f"[[tts]] '{name}' model_variant = {model_variant!r} "
+                        f"is not one of {sorted(allowed_variants)}."
+                    )
+                if (
+                    isinstance(voice, str)
+                    and voice.lower().startswith("clone:")
+                    and not model_variant.endswith("-Base")
+                ):
+                    raise ConfigError(
+                        f"[[tts]] '{name}' uses voice = {voice!r} (voice "
+                        "library clone) but model_variant = "
+                        f"{model_variant!r}. Voice cloning requires a -Base "
+                        "variant; pick '0.6B-Base' or '1.7B-Base'."
+                    )
+                config.model_variant = model_variant
 
         if role == "llm":
             effort = entry.get("reasoning_effort")

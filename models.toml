@@ -215,6 +215,25 @@ voice       = "Sohee"
 instruct    = "Speak in a warm, friendly, conversational tone and pace."
 temperature = 0.7
 
+# Qwen3-TTS with voice cloning via the Base model + voice library. Set
+# voice = "clone:<Name>" where <Name> matches a profile directory under
+# qwen3-tts/voice_library/profiles/ (seeded by setup-qwen3-tts.sh from
+# voices/*.wav + voices/*-transcription.txt). Requires a -Base model
+# variant — enforced at config load.
+#
+# Switching between this and the CustomVoice entries above triggers a
+# full server restart: the optimized backend can only have one variant
+# resident at a time, and the Base-model torch.compile takes ~75 s cold
+# (re-used from TORCHINDUCTOR cache on subsequent boots).
+[[tts]]
+name          = "qwen3-tts (sulafat clone)"
+provider      = "local"
+runtime       = "qwen3-tts"
+model         = "tts-1-en"
+model_variant = "0.6B-Base"
+voice         = "clone:Sulafat"
+temperature   = 0.7
+
 [[tts]]
 name     = "gpt-4o-mini-tts"
 provider = "cloud"

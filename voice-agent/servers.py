@@ -198,7 +198,7 @@ class ServerManager:
         if runtime == "kokoro-fastapi":
             return self._start_kokoro_fastapi(port)
         if runtime == "qwen3-tts":
-            return self._start_qwen3_tts(port)
+            return self._start_qwen3_tts(model, port)
         cmd = [
             sys.executable,
             "-m",
@@ -247,7 +247,7 @@ class ServerManager:
             "tts", cmd, f"kokoro-fastapi (port {port})", cwd=repo, env=env
         )
 
-    def _start_qwen3_tts(self, port: int) -> bool:
+    def _start_qwen3_tts(self, model: ModelConfig, port: int) -> bool:
         repo = _PROJECT_ROOT / "qwen3-tts"
         py = repo / ".venv" / "bin" / "python"
         cache = _PROJECT_ROOT / ".cache" / "qwen3-tts"
@@ -265,7 +265,25 @@ class ServerManager:
             # ~75s compile cost. Same rationale for HF cache.
             "TORCHINDUCTOR_CACHE_DIR": str(cache / "torchinductor"),
             "HF_HOME": str(cache / "hf"),
+            # Voice library: profiles seeded by setup-qwen3-tts.sh at
+            # <repo>/voice_library/profiles/<Name>/. Needed when the active
+            # catalog entry uses voice = "clone:<Name>"; the openai_compatible
+            # router reads this env var to find meta.json + ref audio.
+            "VOICE_LIBRARY_DIR": str(repo / "voice_library"),
         }
+        # Qwen3's optimized backend loads ONE model variant at boot (the
+        # CustomVoice line for preset voices, or the Base line for voice
+        # cloning — they share the encoder/decoder but differ in the
+        # speaker-embedding head). Select per catalog entry via env var
+        # (setup-qwen3-tts.sh patches _default_model_key to honor it).
+        # Mismatch symptom: clone:<Name> voice on a CustomVoice model
+        # returns "voice_cloning_not_supported" 400; a preset voice
+        # (Sohee, Vivian, …) on a Base model returns "unknown voice" 400.
+        # Catalog validation enforces pairing (clone: + -Base, preset +
+        # -CustomVoice) at config load, so only a direct API misuse hits
+        # this server-side.
+        if model.model_variant:
+            env["QWEN3_DEFAULT_MODEL"] = model.model_variant
         cmd = [str(py), "-m", "api.main"]
         return self._launch("tts", cmd, f"qwen3-tts (port {port})", cwd=repo, env=env)
 

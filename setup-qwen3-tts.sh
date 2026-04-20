@@ -374,6 +374,27 @@ if patch_file(
     marker="**model_kwargs,\n        ):",
 ):
     print("Patched optimized_backend.py: forward temperature kwarg to stream_generate_custom_voice")
+
+# 4. optimized_backend.py — honor QWEN3_DEFAULT_MODEL env var over
+# config.yaml's default_model. Lets voice-agent's ServerManager pick
+# which variant (CustomVoice vs Base) to load per catalog entry without
+# rewriting config.yaml on each launch.
+if patch_file(
+    "api/backends/optimized_backend.py",
+    (
+        "    def _default_model_key(self) -> str:\n"
+        "        return self.config.get(\"default_model\", \"0.6B-CustomVoice\")"
+    ),
+    (
+        "    def _default_model_key(self) -> str:\n"
+        "        env_model = os.environ.get(\"QWEN3_DEFAULT_MODEL\")\n"
+        "        if env_model:\n"
+        "            return env_model\n"
+        "        return self.config.get(\"default_model\", \"0.6B-CustomVoice\")"
+    ),
+    marker='env_model = os.environ.get("QWEN3_DEFAULT_MODEL")',
+):
+    print("Patched optimized_backend.py: _default_model_key honors QWEN3_DEFAULT_MODEL")
 PY
 }
 export INSTALL_DIR  # consumed by the heredoc above
@@ -413,6 +434,88 @@ apply_config_optimizations() {
             "$cfg"
         echo "Patched config.yaml: attention: flash_attention_2 -> kernels-community/flash-attn3"
     fi
+}
+
+# Seed the qwen3-tts voice library with reference-audio + transcript pairs
+# from ./voices/. Each wav in voices/ gets one profile directory under
+#
+#   qwen3-tts/voice_library/profiles/<Name>/
+#     ├── <Name>.wav        (reference audio, symlinked)
+#     └── meta.json         (profile metadata read by openai_compatible.py)
+#
+# The client triggers the clone path by sending `voice: "clone:<Name>"` to
+# /v1/audio/speech. The server also needs to be running a -Base model
+# variant (set via QWEN3_DEFAULT_MODEL env var from servers.py).
+#
+# Currently we seed one profile: Sulafat, from voices/gemini-sulafat.wav
+# + voices/gemini-sulafat-transcription.txt. To add another profile,
+# drop <name>.wav + <name>-transcription.txt in voices/ and extend the
+# heredoc below.
+#
+# Idempotent — meta.json rewrites every run (content is deterministic),
+# wav is symlinked into place so updates in voices/ flow through.
+seed_voice_profiles() {
+    local voices_src="$DIR/voices"
+    local profiles_root="$INSTALL_DIR/voice_library/profiles"
+    [ -d "$voices_src" ] || return 0
+
+    python3 - "$voices_src" "$profiles_root" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+voices_src = Path(sys.argv[1])
+profiles_root = Path(sys.argv[2])
+
+# (profile_name, wav_basename, transcription_basename, language, x_vector_only)
+# - profile_name is what users put after clone: in the voice field
+# - x_vector_only=False uses ICL mode (requires ref_text, better quality)
+PROFILES = [
+    ("Sulafat", "gemini-sulafat.wav", "gemini-sulafat-transcription.txt",
+     "English", False),
+]
+
+for name, wav, txt, lang, xvo in PROFILES:
+    wav_src = voices_src / wav
+    txt_src = voices_src / txt
+    if not wav_src.exists():
+        print(f"  skip '{name}': {wav_src} not found", file=sys.stderr)
+        continue
+    if not xvo and not txt_src.exists():
+        print(f"  skip '{name}': {txt_src} not found (required for ICL mode)",
+              file=sys.stderr)
+        continue
+
+    profile_dir = profiles_root / name
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    dst_wav = profile_dir / wav_src.name
+    # Symlink so edits to voices/<wav> flow through without re-running setup.
+    # Replace a stale link / wrong target silently.
+    if dst_wav.is_symlink() or dst_wav.exists():
+        if (dst_wav.is_symlink()
+            and os.readlink(dst_wav) == str(wav_src.resolve())):
+            pass
+        else:
+            dst_wav.unlink()
+            dst_wav.symlink_to(wav_src.resolve())
+    else:
+        dst_wav.symlink_to(wav_src.resolve())
+
+    ref_text = txt_src.read_text(encoding="utf-8").strip() if txt_src.exists() else ""
+    meta = {
+        "name": name,
+        "ref_audio_filename": wav_src.name,
+        "ref_text": ref_text,
+        "x_vector_only_mode": xvo,
+        "language": lang,
+    }
+    (profile_dir / "meta.json").write_text(
+        json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"  seeded voice profile '{name}' at {profile_dir}")
+PY
 }
 
 # Small helper: check if a module is importable in the venv.
@@ -501,6 +604,7 @@ venv_pip() {
 # repair path (which would otherwise re-run `sudo apt-get`).
 apply_config_optimizations
 apply_source_patches
+seed_voice_profiles
 if [ -x "$VENV_PY" ]; then
     write_sitecustomize
 fi
@@ -528,6 +632,7 @@ clone_or_update
 # or imports the affected files.
 apply_config_optimizations
 apply_source_patches
+seed_voice_profiles
 
 # --- Venv ---
 
