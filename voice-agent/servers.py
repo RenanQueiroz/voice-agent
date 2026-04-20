@@ -709,8 +709,15 @@ class ServerManager:
         if role != "tts" or "kokoro" not in model.model.lower():
             return
         try:
-            import misaki
+            # misaki isn't a project dep — it's pip-installed lazily by
+            # _ensure_tts when Kokoro is the active TTS, so pyright can't
+            # see it in static analysis.
+            import misaki  # pyright: ignore[reportMissingImports]
 
+            # Namespace packages have __file__ = None. Bail out quietly
+            # rather than trying to patch a package with no on-disk module.
+            if misaki.__file__ is None:
+                return
             espeak_py = Path(misaki.__file__).parent / "espeak.py"
             if not espeak_py.exists():
                 return
