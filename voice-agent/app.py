@@ -173,9 +173,15 @@ class VoiceAgentApp(App[None]):
                 self.settings, self, mcp_servers=self.mcp_servers
             )
 
-            # Setup done — dismiss splash and show the main UI
+            # Setup done — dismiss splash and show the main UI. We can't
+            # just call `self.pop_screen()` because that targets the TOP
+            # of the screen stack; if the user is currently viewing the
+            # ServerLogScreen over the splash, pop_screen would only
+            # close the log modal and leave the splash stranded. Pop
+            # everything above the main (index-0) screen in one pass.
             if self._splash is not None:
-                self.pop_screen()
+                while len(self.screen_stack) > 1:
+                    self.pop_screen()
                 self._splash = None
 
             # If any active model got auto-swapped at load time (e.g. a

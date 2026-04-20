@@ -120,19 +120,47 @@ class StreamingTTSModel(OpenAITTSModel):
 class QwenStreamingTTSModel(StreamingTTSModel):
     """Streaming adapter for Qwen3-TTS-Openai-Fastapi (optimized backend).
 
-    Three things differ from the mlx-audio base:
+    Qwen3 emits int16 PCM @ 24 kHz on `response_format="pcm"` — the exact
+    format `AudioPlayer` already expects, so the bytes pass through
+    untouched. This subclass exists to (a) adjust the request body (the
+    optimized backend rejects the mlx-audio-specific extras that the
+    base `StreamingTTSModel` always sends — `streaming_interval`,
+    `ref_audio`, `ref_text`), and (b) trim the first ~100 ms of every
+    stream, which contains model-warmup noise regardless of
+    `non_streaming_mode`. `instruct` (style control on CustomVoice
+    models) and `temperature` map through as-is.
 
-    * The server rejects compressed formats when `stream=true` — only `pcm`
-      and `wav` are accepted. We request `pcm`.
-    * `pcm` chunks are **float32** little-endian mono at 24 kHz, not int16.
-      `AudioPlayer` plays int16, so we convert on the fly here. (`wav` would
-      be int16-inside-a-WAV-header, but the server emits the header only as
-      part of the first chunk — simpler to strip it by working in pcm and
-      converting.)
-    * `streaming_interval` / `ref_audio` / `ref_text` are mlx-audio-specific
-      and not understood by this backend. Only `instruct` (style control
-      for CustomVoice models) and `temperature` map through.
+    Audio-quality note: `temperature` (set on the catalog entry) is
+    the main knob for taming speaker-embedding L1-phonetic bleed-
+    through on non-native-language output (e.g. Sohee + English comes
+    out heavily Korean-accented at the model default of 1.0; 0.6-0.7
+    sounds close to native English). Upstream's `/v1/audio/speech`
+    schema doesn't expose `temperature` natively — `setup-qwen3-tts.sh`
+    patches the schema + router + backend to forward it end-to-end.
+    If that patch regresses, temperature from `extra_body` will be
+    silently dropped by pydantic and you'll be back to the default.
+
+    Earlier notes claimed pcm was float32 little-endian. That was wrong
+    / out of date — a raw probe of current upstream builds confirms
+    int16 LE mono at 24 kHz. If a future upstream change breaks that,
+    the symptom is fast, high-pitched, garbled audio — re-probe with
+    a curl to `/v1/audio/speech` and compare byte counts to the
+    duration * sample rate * bytes-per-sample you expect.
     """
+
+    # Qwen's streaming decode emits a short burst of moderate-amplitude
+    # noise at the start of every response — a model-level warmup
+    # artifact, not a transport glitch. Empirical probe (three runs at
+    # temperature 0.5, 0.7, and default 1.0 — shape is temperature-
+    # independent): rms ≈ 1200 at t=0, tapering through t=80ms (rms
+    # ~60-260, still faintly audible on good headphones), and truly
+    # silent from t=90ms onward. Since the voice agent splits on
+    # sentences, each sentence hits this, producing the "garbled start,
+    # fixes itself" symptom. 150 ms of trim (3600 samples × 2 bytes =
+    # 7200 bytes at 24 kHz int16) cleanly clears the taper window with
+    # margin, landing well inside the silence zone so no click at the
+    # cut. The added ~50 ms of latency is imperceptible.
+    _WARMUP_TRIM_BYTES = 7200
 
     async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
         text = text.replace("\u2019", "'")
@@ -148,22 +176,19 @@ class QwenStreamingTTSModel(StreamingTTSModel):
             response_format="pcm",
             extra_body=extra_body,
         )
-        # Chunk boundaries don't respect float32's 4-byte width. Buffer any
-        # trailing partial sample so we never feed a truncated float into
-        # numpy.
-        tail = b""
+        bytes_trimmed = 0
         async with response as stream:
-            async for chunk in stream.iter_bytes(chunk_size=4096):
+            async for chunk in stream.iter_bytes(chunk_size=1024):
                 if not chunk:
                     continue
-                buf = tail + chunk
-                n = (len(buf) // 4) * 4
-                tail = buf[n:]
-                if n == 0:
-                    continue
-                f32 = np.frombuffer(buf[:n], dtype=np.float32)
-                i16 = np.clip(f32, -1.0, 1.0) * 32767.0
-                yield i16.astype(np.int16).tobytes()
+                if bytes_trimmed < self._WARMUP_TRIM_BYTES:
+                    need = self._WARMUP_TRIM_BYTES - bytes_trimmed
+                    if len(chunk) <= need:
+                        bytes_trimmed += len(chunk)
+                        continue
+                    chunk = chunk[need:]
+                    bytes_trimmed = self._WARMUP_TRIM_BYTES
+                yield chunk
 
 
 def _resample_wav_16k(audio_input: AudioInput) -> bytes:

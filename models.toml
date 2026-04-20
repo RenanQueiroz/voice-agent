@@ -166,22 +166,61 @@ voice    = "af_heart"
 # backend (torch.compile + CUDA graphs + flash-attn + token-by-token PCM
 # streaming). First boot does an HF download (0.6B ≈ 1.2 GB) + a ~75s
 # torch.compile; subsequent starts re-use the TORCHINDUCTOR cache in
-# ./.cache/qwen3-tts/. Voices: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan,
-# Aiden, Ono_Anna, Sohee. `instruct` supplies free-form style control.
+# ./.cache/qwen3-tts/.
+#
+# Voices:   Vivian, Serena, Uncle_Fu, Dylan, Eric (Chinese-native);
+#           Ryan, Aiden (English-native);
+#           Ono_Anna (Japanese-native); Soree (Korean-native).
+# `instruct` is free-form style control (e.g. "Speak calmly, slowly").
+#
+# The `model` field selects Qwen's language behavior:
+#
+#   "qwen3-tts" / "tts-1" / "tts-1-hd" — auto-detect per request. Works
+#       for obviously-one-language text, but voice-agent's sentence-by-
+#       sentence splitting means each chunk goes in without context, so
+#       short English lines can get misclassified as Chinese/Japanese
+#       and come out mispronounced. Use only for intentionally
+#       multilingual output.
+#
+#   "tts-1-<lang>" or "tts-1-hd-<lang>" — force a specific language
+#       (overrides auto-detect regardless of chunk content). Supported
+#       codes: en, zh, ja, ko, de, fr, es, ru, pt, it. Use this for
+#       mono-language agents.
+#
+# We default to tts-1-en because the agent instructions + system date
+# prompt are all English. Switch to a different code (or add a sibling
+# [[tts]] entry per language) if you want something else.
+# On Qwen3 open-weights, `temperature` materially affects pronunciation
+# on non-native-language voice+language combinations (e.g. Sohee +
+# English). The model default (1.0) gives the speaker's L1 phonetic
+# prior too much freedom; lowering to ~0.6-0.7 lets the language
+# conditioning dominate and produces cleaner pronunciation. This isn't
+# natively on the server's /v1/audio/speech schema — setup-qwen3-tts.sh
+# patches the schema + router + backend to forward it end-to-end.
 [[tts]]
-name     = "qwen3-tts"
-provider = "local"
-runtime  = "qwen3-tts"
-model    = "qwen3-tts"
-voice    = "Sohee"
-# instruct = "Speak in a warm, conversational tone."
+name        = "qwen3-tts (auto)"
+provider    = "local"
+runtime     = "qwen3-tts"
+model       = "qwen3-tts"
+voice       = "Sohee"
+instruct    = "Speak in a warm, friendly, conversational tone and pace."
+temperature = 0.7
+
+[[tts]]
+name        = "qwen3-tts (en)"
+provider    = "local"
+runtime     = "qwen3-tts"
+model       = "tts-1-en"
+voice       = "Sohee"
+instruct    = "Speak in a warm, friendly, conversational tone and pace."
+temperature = 0.7
 
 [[tts]]
 name     = "gpt-4o-mini-tts"
 provider = "cloud"
 model    = "gpt-4o-mini-tts"
 voice    = "marin"
-instruct = "Speak in a warm, cheerful, friendly, conversational tone and pace."
+instruct = "Speak in a warm, friendly, conversational tone and pace."
 
 # Gemini TTS via native generateContent API (not OpenAI-compatible — we wrap it).
 # Needs GEMINI_API_KEY in .env.

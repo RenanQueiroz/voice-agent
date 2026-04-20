@@ -209,8 +209,20 @@ class AudioPlayer:
         """Stream TTS audio to speakers.
         Returns (tts_total_seconds, tts_first_byte_seconds)."""
         self._stopped = False
+        # `latency="high"` (and the matching blocksize = 0.1s) tells
+        # PortAudio to request a generous output buffer instead of the
+        # ~5-10ms default. Without that cushion, any producer jitter
+        # (TTS network hiccup, Qwen3 inter-chunk gap, scheduler stall)
+        # drains the hardware queue and ALSA reports "underrun_occurred",
+        # which manifests as clicks / glitches in playback. An extra
+        # 50-100ms of one-way latency is inaudible for voice response
+        # and buys a lot of smoothness.
         self._player = sd.OutputStream(
-            samplerate=24000, channels=CHANNELS, dtype=np.int16
+            samplerate=24000,
+            channels=CHANNELS,
+            dtype=np.int16,
+            latency="high",
+            blocksize=2400,  # 100ms at 24 kHz — matches the latency target
         )
         self._player.start()
         tts_start = time.monotonic()

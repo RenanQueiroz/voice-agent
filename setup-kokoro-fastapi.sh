@@ -116,9 +116,21 @@ install_system_deps() {
 
 clone_or_update() {
     if [ -d "$INSTALL_DIR/.git" ]; then
+        # Warn before blowing away any uncommitted edits in the vendored
+        # checkout — otherwise the user has no way to know we just
+        # clobbered their tweaks. `git diff --quiet` returns non-zero
+        # iff there are unstaged changes to tracked files.
+        if ! git -C "$INSTALL_DIR" diff --quiet 2>/dev/null \
+            || ! git -C "$INSTALL_DIR" diff --cached --quiet 2>/dev/null; then
+            echo "WARNING: discarding uncommitted changes in $INSTALL_DIR (syncing to $PINNED_REF)"
+        fi
         echo "Fetching $PINNED_REF..."
         git -C "$INSTALL_DIR" fetch --tags --depth 1 origin "$PINNED_REF"
-        git -C "$INSTALL_DIR" checkout "$PINNED_REF"
+        # reset --hard (rather than checkout) so uncommitted changes
+        # don't block the switch — the user's kokoro checkout is a
+        # vendored, scripted install, not a dev branch.
+        git -C "$INSTALL_DIR" reset --hard "refs/tags/$PINNED_REF" 2>/dev/null \
+            || git -C "$INSTALL_DIR" reset --hard "$PINNED_REF"
     else
         echo "Cloning $REPO_URL@$PINNED_REF into $INSTALL_DIR..."
         git clone --depth 1 --branch "$PINNED_REF" "$REPO_URL" "$INSTALL_DIR"
