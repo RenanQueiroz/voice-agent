@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
@@ -419,17 +420,25 @@ class StatusFooter(Vertical):
 
 
 class ServerRow(Widget):
-    """One row on the splash screen, per server."""
+    """One row on the splash screen, per server. When a log_path is
+    attached, the whole row becomes clickable and pushes a
+    `ServerLogScreen` over the splash so the user can watch the long-
+    running startup (e.g. Qwen3 warmup / HF model download)."""
 
     status: reactive[str] = reactive("pending")
     elapsed: reactive[int] = reactive(0)
 
     _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, log_path: Path | None = None) -> None:
         super().__init__()
         self._name = name
+        self._log_path = log_path
         self._spin_idx = 0
+
+    def set_log_path(self, log_path: Path | None) -> None:
+        self._log_path = log_path
+        self.refresh()
 
     def on_mount(self) -> None:
         self.set_interval(0.1, self._tick)
@@ -454,7 +463,17 @@ class ServerRow(Widget):
             t.append(f"   {self.elapsed}s", style="dim")
         elif self.status == "ready":
             t.append("   ready", style="green dim")
+        # Only hint at clickability while the server is actually running
+        # and writing to its log; after it's ready or failed there's no
+        # useful live output to watch.
+        if self._log_path is not None and self.status in ("waiting", "failed"):
+            t.append("   [click to view output]", style="cyan dim")
         return t
+
+    def on_click(self) -> None:
+        if self._log_path is None:
+            return
+        self.app.push_screen(ServerLogScreen(self._name, self._log_path))
 
 
 class SplashScreen(ModalScreen[None]):
@@ -466,7 +485,8 @@ class SplashScreen(ModalScreen[None]):
         # finished mounting children.
         self._ready = False
         self._pending_log: list[str] = []
-        self._pending_rows: list[tuple[str, str, int]] = []  # (name, status, elapsed)
+        # (name, status, elapsed, log_path)
+        self._pending_rows: list[tuple[str, str, int, Path | None]] = []
 
     def compose(self) -> ComposeResult:
         with Container(id="splash-panel"):
@@ -479,8 +499,8 @@ class SplashScreen(ModalScreen[None]):
         for text in self._pending_log:
             self._append_log(text)
         self._pending_log.clear()
-        for name, status, elapsed in self._pending_rows:
-            self._apply_row(name, status, elapsed)
+        for name, status, elapsed, log_path in self._pending_rows:
+            self._apply_row(name, status, elapsed, log_path)
         self._pending_rows.clear()
 
     # ── API used by VoiceAgentApp ─────────────────────────
@@ -499,7 +519,7 @@ class SplashScreen(ModalScreen[None]):
         log.mount(Static(escape(text)))
         log.scroll_end(animate=False)
 
-    def ensure_row(self, name: str) -> ServerRow | None:
+    def ensure_row(self, name: str, log_path: Path | None = None) -> ServerRow | None:
         if not self._ready:
             return None
         try:
@@ -508,36 +528,136 @@ class SplashScreen(ModalScreen[None]):
             return None
         for row in container.query(ServerRow):
             if row._name == name:
+                # Upgrade the row's log_path lazily — we often create the
+                # row on "Starting X…" before the launcher knows the log
+                # path, and the path is attached by the next call.
+                if log_path is not None:
+                    row.set_log_path(log_path)
                 return row
-        row = ServerRow(name)
+        row = ServerRow(name, log_path=log_path)
         container.mount(row)
         return row
 
-    def _apply_row(self, name: str, status: str, elapsed: int) -> None:
-        row = self.ensure_row(name)
+    def _apply_row(
+        self,
+        name: str,
+        status: str,
+        elapsed: int,
+        log_path: Path | None = None,
+    ) -> None:
+        row = self.ensure_row(name, log_path=log_path)
         if row is None:
             return
         row.status = status
         if status == "waiting":
             row.elapsed = elapsed
 
-    def set_waiting(self, name: str, elapsed: int) -> None:
+    def set_waiting(
+        self, name: str, elapsed: int, log_path: Path | None = None
+    ) -> None:
         if not self._ready:
-            self._pending_rows.append((name, "waiting", elapsed))
+            self._pending_rows.append((name, "waiting", elapsed, log_path))
             return
-        self._apply_row(name, "waiting", elapsed)
+        self._apply_row(name, "waiting", elapsed, log_path)
 
     def set_ready(self, name: str) -> None:
         if not self._ready:
-            self._pending_rows.append((name, "ready", 0))
+            self._pending_rows.append((name, "ready", 0, None))
             return
         self._apply_row(name, "ready", 0)
 
     def set_failed(self, name: str) -> None:
         if not self._ready:
-            self._pending_rows.append((name, "failed", 0))
+            self._pending_rows.append((name, "failed", 0, None))
             return
         self._apply_row(name, "failed", 0)
+
+
+# ── Server log viewer ────────────────────────────────────
+
+
+class ServerLogScreen(ModalScreen[None]):
+    """Tail a server's log file in a modal so the user can see what's
+    happening during a long startup (e.g. Qwen3 downloading the model or
+    compiling kernels). Auto-refreshes every 500ms by reading the bytes
+    appended since the last tick.
+
+    Not a live `tail -f` stream — the log file is written to by a
+    subprocess we don't own; we poll the file size and read the delta.
+    That's plenty responsive for human eyes and avoids extra threads.
+    """
+
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("ctrl+c", "close", "Close"),
+    ]
+
+    def __init__(self, name: str, log_path: Path) -> None:
+        super().__init__()
+        self._name = name
+        self._log_path = log_path
+        # Byte offset into the log file of the last chunk we read. We
+        # append only new bytes each tick so the scroll position stays
+        # at the bottom without re-rendering the whole buffer.
+        self._offset = 0
+        self._auto_scroll = True
+        # Accumulate rendered text on the screen rather than round-tripping
+        # through Static.renderable (which isn't a public attribute).
+        self._buffer = ""
+
+    def compose(self) -> ComposeResult:
+        with Container(id="log-panel"):
+            yield Label(f"{self._name} — {self._log_path.name}", id="log-title")
+            with VerticalScroll(id="log-body"):
+                yield Static("", id="log-content", markup=False)
+            with Horizontal(id="log-buttons"):
+                yield Button("Close", id="log-close", variant="primary")
+
+    def on_mount(self) -> None:
+        self._poll()  # render whatever's already in the file
+        self.set_interval(0.5, self._poll)
+
+    def _poll(self) -> None:
+        if not self._log_path.exists():
+            return
+        try:
+            size = self._log_path.stat().st_size
+        except OSError:
+            return
+        if size <= self._offset:
+            # Also handle truncation (a new server replaced the log file).
+            if size < self._offset:
+                self._offset = 0
+            else:
+                return
+        try:
+            with self._log_path.open("rb") as f:
+                f.seek(self._offset)
+                chunk = f.read(size - self._offset)
+            self._offset = size
+        except OSError:
+            return
+        try:
+            content = self.query_one("#log-content", Static)
+            body = self.query_one("#log-body", VerticalScroll)
+        except Exception:
+            return
+        self._buffer += chunk.decode(errors="replace")
+        # Cap the rendered buffer so a long-running server doesn't grow
+        # the widget unboundedly. 200 KB is ~4k lines, comfortably more
+        # than any startup flow produces.
+        if len(self._buffer) > 200_000:
+            self._buffer = self._buffer[-200_000:]
+        content.update(self._buffer)
+        if self._auto_scroll:
+            body.scroll_end(animate=False)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "log-close":
+            self.dismiss(None)
 
 
 # ── Model switch modal ───────────────────────────────────

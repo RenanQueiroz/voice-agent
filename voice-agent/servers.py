@@ -267,12 +267,16 @@ class ServerManager:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
     ) -> bool:
-        self.display.server_starting(display_name)
         _LOG_DIR.mkdir(exist_ok=True)
         log_path = (
             _LOG_DIR
             / f"{display_name.replace(' ', '_').replace('(', '').replace(')', '')}.log"
         )
+        # Announce with the log path so the splash can attach a "click to
+        # view output" affordance to this server's row — lets the user
+        # watch long startups (e.g. Qwen3's HF download + torch.compile)
+        # instead of staring at a stalled spinner.
+        self.display.server_starting(display_name, log_path)
         log_file = open(log_path, "w")  # noqa: SIM115
         try:
             proc = subprocess.Popen(

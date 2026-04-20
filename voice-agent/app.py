@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
@@ -691,11 +692,14 @@ class VoiceAgentApp(App[None]):
     def server_patched(self, description: str) -> None:
         self._splash_log(f"✓ {description}")
 
-    def server_starting(self, name: str) -> None:
+    def server_starting(self, name: str, log_path: Path | None = None) -> None:
         # Seed the row as "waiting" with 0s so it shows up immediately;
         # server_waiting() will update the elapsed count as time passes.
+        # log_path (when provided) makes the row clickable so the user
+        # can pop open a live tail of the server's output — critical on
+        # Qwen3's multi-minute warmup / HF download.
         if self._splash is not None:
-            self._splash.set_waiting(name, 0)
+            self._splash.set_waiting(name, 0, log_path=log_path)
         self._splash_log(f"Starting {name}…")
 
     def server_waiting(self, name: str, elapsed: int) -> None:
