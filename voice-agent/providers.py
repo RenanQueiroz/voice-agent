@@ -117,6 +117,55 @@ class StreamingTTSModel(OpenAITTSModel):
                 yield chunk
 
 
+class QwenStreamingTTSModel(StreamingTTSModel):
+    """Streaming adapter for Qwen3-TTS-Openai-Fastapi (optimized backend).
+
+    Three things differ from the mlx-audio base:
+
+    * The server rejects compressed formats when `stream=true` — only `pcm`
+      and `wav` are accepted. We request `pcm`.
+    * `pcm` chunks are **float32** little-endian mono at 24 kHz, not int16.
+      `AudioPlayer` plays int16, so we convert on the fly here. (`wav` would
+      be int16-inside-a-WAV-header, but the server emits the header only as
+      part of the first chunk — simpler to strip it by working in pcm and
+      converting.)
+    * `streaming_interval` / `ref_audio` / `ref_text` are mlx-audio-specific
+      and not understood by this backend. Only `instruct` (style control
+      for CustomVoice models) and `temperature` map through.
+    """
+
+    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        text = text.replace("\u2019", "'")
+        extra_body: dict[str, object] = {"stream": True}
+        if self._instruct:
+            extra_body["instruct"] = self._instruct
+        if self._temperature is not None:
+            extra_body["temperature"] = self._temperature
+        response = self._client.audio.speech.with_streaming_response.create(
+            model=self.model,
+            voice=settings.voice or "Vivian",
+            input=text,
+            response_format="pcm",
+            extra_body=extra_body,
+        )
+        # Chunk boundaries don't respect float32's 4-byte width. Buffer any
+        # trailing partial sample so we never feed a truncated float into
+        # numpy.
+        tail = b""
+        async with response as stream:
+            async for chunk in stream.iter_bytes(chunk_size=4096):
+                if not chunk:
+                    continue
+                buf = tail + chunk
+                n = (len(buf) // 4) * 4
+                tail = buf[n:]
+                if n == 0:
+                    continue
+                f32 = np.frombuffer(buf[:n], dtype=np.float32)
+                i16 = np.clip(f32, -1.0, 1.0) * 32767.0
+                yield i16.astype(np.int16).tobytes()
+
+
 def _resample_wav_16k(audio_input: AudioInput) -> bytes:
     """Convert AudioInput (24kHz int16) to a 16kHz WAV byte buffer."""
     buf = audio_input.buffer
@@ -741,15 +790,27 @@ def create_pipeline(
             base_url=f"{settings.tts_url}/v1",
             api_key="not-needed",
         )
-        tts_model = StreamingTTSModel(
-            model=tts.model,
-            openai_client=tts_client,
-            ref_audio=tts.ref_audio,
-            ref_text=tts.ref_text,
-            streaming_interval=tts.streaming_interval,
-            instruct=tts.instruct,
-            temperature=tts.temperature,
-        )
+        # Qwen3-TTS streams float32 PCM and rejects the mlx-audio extras
+        # (streaming_interval / ref_audio / ref_text). Use a dedicated
+        # subclass that converts float32 → int16 and sends only the fields
+        # this backend accepts.
+        if tts.runtime == "qwen3-tts":
+            tts_model = QwenStreamingTTSModel(
+                model=tts.model,
+                openai_client=tts_client,
+                instruct=tts.instruct,
+                temperature=tts.temperature,
+            )
+        else:
+            tts_model = StreamingTTSModel(
+                model=tts.model,
+                openai_client=tts_client,
+                ref_audio=tts.ref_audio,
+                ref_text=tts.ref_text,
+                streaming_interval=tts.streaming_interval,
+                instruct=tts.instruct,
+                temperature=tts.temperature,
+            )
     elif tts.vendor == "gemini":
         from .gemini_tts import GeminiTTSModel
 

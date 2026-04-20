@@ -7,11 +7,13 @@
 # from `provider` — don't include it in `name`.
 #
 # Local entries must declare a `runtime`. Registered runtimes per role:
-#   STT — whispercpp (linux + macOS)
-#   LLM — llamacpp   (linux + macOS),
-#         mlx-lm    (macOS only),
-#         mlx-vlm   (macOS only)
-#   TTS — mlx-audio  (macOS only)
+#   STT — whispercpp      (linux + macOS)
+#   LLM — llamacpp        (linux + macOS),
+#         mlx-lm          (macOS only),
+#         mlx-vlm         (macOS only)
+#   TTS — mlx-audio       (macOS only),
+#         kokoro-fastapi  (linux only — CUDA),
+#         qwen3-tts       (linux only — CUDA)
 # Entries whose runtime isn't supported on the current OS are filtered out
 # of the Switch modal at startup; if preferences.toml points at a filtered
 # entry the app auto-falls back to the first compatible one and shows a
@@ -48,17 +50,10 @@ model    = "gpt-4o-transcribe"
 # when BOTH the STT and LLM are local (they share the same whisper audio
 # buffer — see providers.py).
 [[llm]]
-name        = "qwen3.6-35b-a3b-instruct-q4_k_xl (llamacpp)"
+name        = "qwen3.6-35b-a3b (llamacpp)"
 provider    = "local"
 runtime     = "llamacpp"
-model       = "qwen3.6-35b-a3b-instruct-q4_k_xl"     # must match a section alias in the preset
-preset      = "llamacpp-models.ini"
-
-[[llm]]
-name        = "qwen3.6-35b-a3b-instruct-q2_k_xl (llamacpp)"
-provider    = "local"
-runtime     = "llamacpp"
-model       = "qwen3.6-35b-a3b-instruct-q2_k_xl"     # must match a section alias in the preset
+model       = "qwen3.6-35b-a3b"     # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 
 [[llm]]
@@ -154,6 +149,32 @@ provider = "local"
 runtime  = "mlx-audio"
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
+
+# Linux + CUDA. Clone of remsky/Kokoro-FastAPI, installed into
+# ./kokoro-fastapi/ by setup-kokoro-fastapi.sh on first switch. OpenAI-compat
+# endpoint on port 8000 (or whatever [local].tts_url points at). Same
+# Kokoro-82M model family as the mlx-audio entry above — voice names use the
+# upstream `<lang><gender>_<name>` scheme (af_heart, bf_emma, am_michael, …).
+[[tts]]
+name     = "kokoro-fastapi"
+provider = "local"
+runtime  = "kokoro-fastapi"
+model    = "kokoro"           # OpenAI-compat model id; maps to kokoro-v1_0
+voice    = "af_heart"
+
+# Linux + CUDA. Qwen3-TTS via groxaxo/Qwen3-TTS-Openai-Fastapi's `optimized`
+# backend (torch.compile + CUDA graphs + flash-attn + token-by-token PCM
+# streaming). First boot does an HF download (0.6B ≈ 1.2 GB) + a ~75s
+# torch.compile; subsequent starts re-use the TORCHINDUCTOR cache in
+# ./.cache/qwen3-tts/. Voices: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan,
+# Aiden, Ono_Anna, Sohee. `instruct` supplies free-form style control.
+[[tts]]
+name     = "qwen3-tts"
+provider = "local"
+runtime  = "qwen3-tts"
+model    = "qwen3-tts"
+voice    = "Sohee"
+# instruct = "Speak in a warm, conversational tone."
 
 [[tts]]
 name     = "gpt-4o-mini-tts"

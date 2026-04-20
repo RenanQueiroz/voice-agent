@@ -17,9 +17,9 @@ A quick checklist before you finish a change: `grep` the old name/value across `
 
 ## Project overview
 
-Real-time speech-to-speech voice agent built on the OpenAI Agents SDK's `VoicePipeline`. The UI is a fullscreen Textual app. Each role (STT / LLM / TTS) is configured independently as either cloud (OpenAI or Gemini) or local (whisper.cpp / mlx-audio / mlx-vlm / mlx-lm / llama-server); the user can mix-and-match and swap at runtime.
+Real-time speech-to-speech voice agent built on the OpenAI Agents SDK's `VoicePipeline`. The UI is a fullscreen Textual app. Each role (STT / LLM / TTS) is configured independently as either cloud (OpenAI or Gemini) or local (whisper.cpp / mlx-audio / mlx-vlm / mlx-lm / llama-server / kokoro-fastapi / qwen3-tts); the user can mix-and-match and swap at runtime.
 
-Runs on macOS (all runtimes) and Linux (llama.cpp + whisper.cpp + any cloud role — the mlx stack is Apple-Silicon-only and is filtered out of the catalog on Linux). See the runtime registry below.
+Runs on macOS (all runtimes) and Linux (llama.cpp + whisper.cpp + kokoro-fastapi + qwen3-tts + any cloud role — the mlx stack is Apple-Silicon-only and is filtered out of the catalog on Linux). See the runtime registry below.
 
 ## Package structure
 
@@ -45,7 +45,8 @@ voice-agent/
   pipeline.py       # Async _run_vad loop, _process_turn,
                     #   run_pipeline_loops entrypoint
   providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
-                    #   StreamingTTSModel, AudioPassthroughSTTModel,
+                    #   StreamingTTSModel, QwenStreamingTTSModel,
+                    #   AudioPassthroughSTTModel,
                     #   create_agent / create_pipeline, _hosted_tools
   gemini_tts.py     # GeminiTTSModel — wraps Gemini's native generateContent
                     #   (OpenAI-compat doesn't cover TTS)
@@ -69,7 +70,7 @@ voice-agent/
 - `mcp_servers.toml` — gitignored. MCP server definitions. Copy from `mcp_servers.toml.example`. Per-server `enabled = false` skips a server without deleting it.
 - `llamacpp-models.ini` — gitignored. llama-server model preset file. Used only when any LLM entry has `runtime = "llamacpp"`. Copy from `llamacpp-models.ini.example`.
 - `model_deps.toml` — committed. Maps name patterns to pip deps + per-package-manager system deps (`[<pattern>.system]` with `brew`/`apt`/`dnf`/`pacman`/`zypper` keys).
-- `setup-whispercpp.sh` / `setup-llamacpp.sh` — committed.
+- `setup-whispercpp.sh` / `setup-llamacpp.sh` / `setup-kokoro-fastapi.sh` / `setup-qwen3-tts.sh` — committed. The last two are Linux-only (CUDA) and clone their upstream repos into `./kokoro-fastapi/` and `./qwen3-tts/` respectively, each with its own uv venv; they're idempotent (sentinel stamp files at `./<repo>/.installed`) and safe to run from `ServerManager._ensure_setup_script` on every first-switch attempt.
 
 Priority: environment variable > `.env` > `config.toml`.
 
@@ -118,7 +119,7 @@ Config has a *catalog* per role, not a single `voice_mode`:
 
 ### Runtime registry + OS filtering
 
-[voice-agent/runtimes.py](voice-agent/runtimes.py) owns the `RUNTIMES` table — one entry per local backend we know how to drive (`whispercpp`, `llamacpp`, `mlx-lm`, `mlx-vlm`, `mlx-audio`). Each `Runtime` records the roles it applies to, its `supported_os` set (e.g. `{"darwin"}` for every mlx-* entry), the pip module/package name (None for binary runtimes), and the health path `ServerManager._wait_ready` polls. Config parsing rejects unknown runtime IDs and wrong-role combos against this registry.
+[voice-agent/runtimes.py](voice-agent/runtimes.py) owns the `RUNTIMES` table — one entry per local backend we know how to drive (`whispercpp`, `llamacpp`, `mlx-lm`, `mlx-vlm`, `mlx-audio`, `kokoro-fastapi`, `qwen3-tts`). Each `Runtime` records the roles it applies to, its `supported_os` set (e.g. `{"darwin"}` for every mlx-* entry, `{"linux"}` for the CUDA TTS servers), the pip module/package name (None for binary runtimes AND for source-installed FastAPI TTS servers), the health path `ServerManager._wait_ready` polls, and an optional `ready_check` callable that decides from the health response whether the server is actually ready (defaults to "any 200"; Qwen3 overrides it to parse the body's `status` field, since Qwen3 returns 200 with `{"status":"initializing"}` during torch.compile warmup). Config parsing rejects unknown runtime IDs and wrong-role combos against this registry.
 
 [voice-agent/platform_info.py](voice-agent/platform_info.py) wraps OS detection: `current_os()` returns `"darwin" | "linux" | "windows" | "unknown"`, `linux_package_manager()` returns `"apt" | "dnf" | "pacman" | "zypper"` from `/etc/os-release` (with a `shutil.which` fallback), and `has_cuda()` probes `nvidia-smi`. Callers should always go through these instead of `platform.system()` directly.
 
@@ -160,11 +161,15 @@ Blocked while `self.responding` is true — mounts a notice instead.
 
 One-off details:
 
-- **mlx-audio** (TTS port 8000) takes no model at startup — the model is in each request body, so swapping between local TTS entries does not restart it.
+- **mlx-audio** (TTS port 8000, darwin) takes no model at startup — the model is in each request body, so swapping between mlx-audio TTS entries does not restart it.
+- **kokoro-fastapi** (TTS port 8000, linux+CUDA) is a cloned repo at `./kokoro-fastapi/` with its own uv venv. `ServerManager._start_kokoro_fastapi` launches `./kokoro-fastapi/.venv/bin/python -m uvicorn api.src.main:app` with `cwd` set to the repo and `PYTHONPATH` / espeak-ng env vars set. OpenAI-compat `/v1/audio/speech` — int16 PCM @ 24 kHz, plays directly through `AudioPlayer`. Health at `/health`.
+- **qwen3-tts** (TTS port 8000, linux+CUDA) is a cloned repo at `./qwen3-tts/` with its own uv venv running the `optimized` backend (`TTS_BACKEND=optimized`). Same launch pattern (own venv + repo cwd). Returns **float32 PCM** on `response_format="pcm"`, which is why `providers.py` uses a dedicated `QwenStreamingTTSModel` subclass that converts float32 → int16 on the fly before yielding to the SDK. Also uses the `ready_check` hook on its Runtime entry because `/health` returns HTTP 200 during torch.compile warmup.
 - **whisper-server** (STT port 9000) takes `-m <model>` at startup — swapping local STT models restarts.
 - **LLM server** (port 8080) command depends on the active LLM's `runtime` field (`mlx-vlm` / `mlx-lm` / `llamacpp`); swapping between local LLMs restarts. The health path comes from the `RUNTIMES` registry (`/v1/models` for mlx-*, `/health` for llamacpp).
 
-Deps (`_ensure_whisper`, `_ensure_llm`, `_ensure_tts`) run the first time each role is started, not up front. `_ensure_llm` / `_ensure_tts` consult `RUNTIMES[runtime].pip_module` / `pip_package` to decide what (if anything) to install. `_ensure_system_deps` detects the host package manager via `platform_info.linux_package_manager()` (falls back to `brew` on macOS) and installs from the `[<model>.system]` table in `model_deps.toml`. `_apply_patches` still handles the misaki/phonemizer Kokoro quirk when the active TTS matches `"kokoro"`.
+Deps (`_ensure_whisper`, `_ensure_llm`, `_ensure_tts`) run the first time each role is started, not up front. `_ensure_llm` / `_ensure_tts` consult `RUNTIMES[runtime].pip_module` / `pip_package` to decide what (if anything) to install. `_ensure_system_deps` detects the host package manager via `platform_info.linux_package_manager()` (falls back to `brew` on macOS) and installs from the `[<model>.system]` table in `model_deps.toml`. `_apply_patches` still handles the misaki/phonemizer Kokoro quirk when the active TTS matches `"kokoro"` — the patch only matters for mlx-audio's Kokoro-MLX; Kokoro-FastAPI has its own misaki vendored and the upstream already handles espeak-ng discovery through env vars (`PHONEMIZER_ESPEAK_DATA`, `PHONEMIZER_ESPEAK_PATH`) that `_start_kokoro_fastapi` sets at launch, so the patch is a no-op for the Linux path.
+
+For source-installed TTS runtimes (`kokoro-fastapi`, `qwen3-tts`), `_ensure_tts` skips the pip path entirely and calls `_ensure_setup_script(...)` — a shared helper with `_ensure_llamacpp` that runs the corresponding `setup-<runtime>.sh` once, guarded by a sentinel path (`./<repo>/.venv/bin/python`). Both setup scripts are idempotent — re-running when already installed at the pinned ref is a no-op.
 
 ### Providers
 
@@ -313,7 +318,14 @@ uv run python -m voice-agent            # Run
 - **`tts_voice` is optional.** Some local TTS models (chatterbox) don't take a voice. `ModelConfig.voice = None` is handled by `create_pipeline_config`.
 - **Preferences fallback.** Two fallback paths in `_resolve_active` — an *unknown* name (not anywhere in the catalog) prints a stderr warning and picks the first entry silently; a name that *was* in the catalog but got OS-filtered appends a line to `Settings.fallback_notes` so `VoiceAgentApp._run_pipeline` can mount a `NoticeCard` for the user. Don't collapse these into one path — the user needs to know why their active model changed.
 - **`server` is renamed to `runtime`.** `ModelConfig.runtime` applies to all local entries (STT / LLM / TTS), not just LLMs. `_parse_catalog` raises a clear migration error if a catalog entry still uses the old `server` field name. When adding a new local runtime, add it to `voice-agent/runtimes.py` first — config validation and the `ServerManager` dispatch both read from the registry.
-- **Linux = cloud TTS only.** No local TTS runtime runs on Linux today (mlx-audio is Apple-Silicon-only). The catalog filter handles this automatically, but if you add a Linux-capable TTS runtime later, register it in `runtimes.py` with `supported_os={"linux", ...}` before wiring it into `ServerManager._start_tts`.
+- **Linux local TTS is now kokoro-fastapi + qwen3-tts.** Both are Linux+CUDA only (`supported_os={"linux"}`), source-installed via `setup-kokoro-fastapi.sh` / `setup-qwen3-tts.sh` into `./kokoro-fastapi/` and `./qwen3-tts/`, each with its own uv venv (torch versions conflict: Kokoro pins `torch+cu129`, Qwen3 uses `torch+cu121`). The catalog filter drops them on macOS; mlx-audio is filtered out on Linux. If you add another local TTS, add it to `runtimes.py` with the right `supported_os` *before* wiring it into `ServerManager._start_tts`, and use `_ensure_setup_script` if it needs a cloned repo + venv.
+- **Qwen3-TTS streams float32 PCM, not int16.** `providers.py` has a dedicated `QwenStreamingTTSModel` subclass that converts float32 → int16 before yielding to the OpenAI SDK's streaming response. Don't try to route Qwen3 through the mlx-audio `StreamingTTSModel` — the `streaming_interval` / `ref_audio` / `ref_text` fields aren't understood by the Qwen3 server, and feeding float32 bytes straight into `sd.OutputStream(dtype=np.int16)` produces noise.
+- **Qwen3-TTS warmup needs a body-level health check.** The server returns HTTP 200 with `{"status":"initializing"}` during torch.compile warmup (~60–120 s on first boot, ~30 s warm). `Runtime.ready_check` is how `servers.py::_wait_for_health` distinguishes "booted" from "ready" — do not change the default `ready_check=(lambda r: r.status_code == 200)` behavior without updating every runtime's health semantics.
+- **flash-attn is required for qwen3-tts and is built from source.** Setup fails hard if the build fails. flash-attn doesn't publish PyPI wheels for every `(python, torch, cuda)` combo, so we skip the "try prebuilt first" dance and go straight to source via `--no-build-isolation`. That means:
+  - `nvcc` (CUDA Toolkit) must be reachable on `PATH` or under `/usr/local/cuda/bin` / `/opt/cuda/bin`. `setup-qwen3-tts.sh` probes these paths and exits early with a clear message if nvcc isn't found.
+  - `wheel`, `setuptools`, `ninja`, and `packaging` must be pre-installed in the venv before the flash-attn install runs (the `--no-build-isolation` flag means uv uses whatever is already there; without wheel/ninja/packaging the build subprocess fails with `ModuleNotFoundError: wheel`). The script installs those up front.
+  - On hosts with &lt;16 GB RAM, set `MAX_JOBS=2` in the env before running the script to avoid OOM during compile.
+  - Don't silently downgrade the config to `attention: sdpa` — "flash-attn required" was an explicit user preference.
 - **Silero VAD ONNX is a hard requirement for ALL configs, not just local STT.** `audio.VADRecorder.__init__` unconditionally loads `whispercpp/models/silero_vad.onnx` because input is always Silero VAD (push-to-talk was removed). Cloud-only users need the file just as much as local-STT users. `setup.sh` downloads it; `setup-whispercpp.sh` also downloads it as part of its own flow (both idempotent). Don't move the download *only* behind a local-STT gate — a cloud-only config crashes in `_run_vad` with `NO_SUCHFILE` right after the splash dismisses, which looks like the app silently exiting.
 - **Linux audio stack is three packages, not one.** `setup.sh` installs:
   - **PortAudio runtime** (`libportaudio2` / `portaudio`) — `sounddevice` (imported unconditionally by `voice-agent/audio.py`) `dlopen`s `libportaudio.so.2` at import time. Missing → app crashes during import with `OSError: PortAudio library not found`.

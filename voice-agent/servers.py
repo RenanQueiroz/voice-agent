@@ -10,6 +10,7 @@ local model for that role.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import signal
 import subprocess
@@ -23,7 +24,7 @@ import httpx
 
 from .config import ModelConfig, Settings
 from .platform_info import current_os, linux_package_manager
-from .runtimes import RUNTIMES, get_runtime
+from .runtimes import RUNTIMES, Runtime, get_runtime
 
 if TYPE_CHECKING:
     from .display import Display
@@ -147,6 +148,11 @@ class ServerManager:
 
     def _start_tts(self, model: ModelConfig) -> bool:
         port = self._parse_port(self._require_url("tts"))
+        runtime = model.runtime
+        if runtime == "kokoro-fastapi":
+            return self._start_kokoro_fastapi(port)
+        if runtime == "qwen3-tts":
+            return self._start_qwen3_tts(port)
         cmd = [
             sys.executable,
             "-m",
@@ -163,6 +169,59 @@ class ServerManager:
             "0.5",
         ]
         return self._launch("tts", cmd, f"mlx-audio (port {port})")
+
+    def _start_kokoro_fastapi(self, port: int) -> bool:
+        repo = _PROJECT_ROOT / "kokoro-fastapi"
+        py = repo / ".venv" / "bin" / "python"
+        env = {
+            **os.environ,
+            "USE_GPU": "true",
+            "USE_ONNX": "false",
+            # The server reads source from api/src/main.py; it expects
+            # both the repo root and the `api/` package on PYTHONPATH.
+            "PYTHONPATH": f"{repo}:{repo / 'api'}",
+            "MODEL_DIR": "src/models",
+            "VOICES_DIR": "src/voices/v1_0",
+            # phonemizer looks for espeak-ng under these paths at import time.
+            "PHONEMIZER_ESPEAK_DATA": "/usr/share/espeak-ng-data",
+            "PHONEMIZER_ESPEAK_PATH": "/usr/bin",
+            "ESPEAK_DATA_PATH": "/usr/share/espeak-ng-data",
+        }
+        cmd = [
+            str(py),
+            "-m",
+            "uvicorn",
+            "api.src.main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+        ]
+        return self._launch(
+            "tts", cmd, f"kokoro-fastapi (port {port})", cwd=repo, env=env
+        )
+
+    def _start_qwen3_tts(self, port: int) -> bool:
+        repo = _PROJECT_ROOT / "qwen3-tts"
+        py = repo / ".venv" / "bin" / "python"
+        cache = _PROJECT_ROOT / ".cache" / "qwen3-tts"
+        cache.mkdir(parents=True, exist_ok=True)
+        env = {
+            **os.environ,
+            # Optimized backend: torch.compile + CUDA graphs + flash-attn +
+            # token-by-token PCM streaming. Configured via config.yaml in the
+            # repo; setup-qwen3-tts.sh seeds it from the upstream default.
+            "TTS_BACKEND": "optimized",
+            "TTS_CONFIG": str(repo / "config.yaml"),
+            "HOST": "0.0.0.0",
+            "PORT": str(port),
+            # Persist torch.compile artifacts so subsequent boots skip the
+            # ~75s compile cost. Same rationale for HF cache.
+            "TORCHINDUCTOR_CACHE_DIR": str(cache / "torchinductor"),
+            "HF_HOME": str(cache / "hf"),
+        }
+        cmd = [str(py), "-m", "api.main"]
+        return self._launch("tts", cmd, f"qwen3-tts (port {port})", cwd=repo, env=env)
 
     def _start_llm(self, model: ModelConfig) -> bool:
         port = self._parse_port(self._require_url("llm"))
@@ -200,7 +259,14 @@ class ServerManager:
 
     # ── Process plumbing ──────────────────────────────────
 
-    def _launch(self, role: Role, cmd: list[str], display_name: str) -> bool:
+    def _launch(
+        self,
+        role: Role,
+        cmd: list[str],
+        display_name: str,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> bool:
         self.display.server_starting(display_name)
         _LOG_DIR.mkdir(exist_ok=True)
         log_path = (
@@ -214,6 +280,8 @@ class ServerManager:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
+                cwd=str(cwd) if cwd else None,
+                env=env,
             )
         except FileNotFoundError as e:
             self.display.server_failed(display_name, [str(e)])
@@ -225,23 +293,26 @@ class ServerManager:
     async def _wait_ready(self, role: Role, model: ModelConfig) -> bool:
         url = self._require_url(role)
         display_name = self._display_name(role)
-        # Health path comes from the runtime registry — falls back to root
-        # for cloud entries (which we never actually wait on here, since
-        # _active_local_roles filters to local).
+        # Runtime decides both the health path and when a response
+        # counts as "ready" (Qwen3 reports 200 during torch.compile
+        # warmup — its ready_check inspects the body).
         runtime = RUNTIMES.get(model.runtime or "")
-        health_path = runtime.health_path if runtime else "/"
-        return await self._wait_for_health(url, display_name, role, health_path)
+        return await self._wait_for_health(url, display_name, role, runtime)
 
     async def _wait_for_health(
         self,
         url: str,
         display_name: str,
         role: Role,
-        health_path: str,
+        runtime: Runtime | None,
     ) -> bool:
         proc = self._procs.get(role)
         if proc is None:
             return False
+        health_path = runtime.health_path if runtime else "/"
+        ready_check = (
+            runtime.ready_check if runtime else (lambda r: r.status_code == 200)
+        )
         health_url = f"{url.rstrip('/')}{health_path}"
         elapsed = 0.0
         interval = 2.0
@@ -256,10 +327,24 @@ class ServerManager:
                     return False
                 try:
                     resp = await client.get(health_url)
-                    if resp.status_code == 200:
+                    try:
+                        ready = ready_check(resp)
+                    except Exception:
+                        # Malformed JSON mid-warmup, etc. — not fatal; keep
+                        # polling. Worst case we time out and the user sees
+                        # a server_timeout log tail.
+                        ready = False
+                    if ready:
                         self.display.server_ready_one(display_name)
                         return True
-                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    # HTTP responded but ready_check said no (e.g. Qwen3
+                    # "initializing" during warmup). Surface elapsed as a
+                    # waiting heartbeat so the splash doesn't look frozen.
+                    t = int(elapsed)
+                    if t != last_elapsed:
+                        self.display.server_waiting(display_name, t)
+                        last_elapsed = t
+                except httpx.ConnectError, httpx.ConnectTimeout:
                     # ConnectError: TCP refused (not listening yet).
                     # ConnectTimeout: SYN got no answer (process running but
                     # hasn't bound to the port — e.g. whisper-server stuck
@@ -319,7 +404,16 @@ class ServerManager:
         return parsed.port or 8000
 
     def _display_name(self, role: Role) -> str:
-        return {"stt": "whisper-server", "tts": "mlx-audio", "llm": "llm-server"}[role]
+        if role == "tts":
+            runtime = (
+                self.settings.tts.runtime
+                if self.settings.tts.provider == "local"
+                else None
+            )
+            if runtime:
+                return runtime
+            return "mlx-audio"
+        return {"stt": "whisper-server", "llm": "llm-server"}[role]
 
     def _get_log_tail(self, role: Role, lines: int = 15) -> list[str]:
         path = self._log_files.get(role)
@@ -442,6 +536,20 @@ class ServerManager:
     def _ensure_tts(self, model: ModelConfig) -> bool:
         if not self._ensure_system_deps(model.model):
             return False
+        # Source-installed Linux TTS runtimes: each has its own repo +
+        # venv driven by a setup script. Skip the pip-install dance.
+        if model.runtime == "kokoro-fastapi":
+            return self._ensure_setup_script(
+                "setup-kokoro-fastapi.sh",
+                _PROJECT_ROOT / "kokoro-fastapi" / ".venv" / "bin" / "python",
+                "kokoro-fastapi",
+            )
+        if model.runtime == "qwen3-tts":
+            return self._ensure_setup_script(
+                "setup-qwen3-tts.sh",
+                _PROJECT_ROOT / "qwen3-tts" / ".venv" / "bin" / "python",
+                "qwen3-tts",
+            )
         packages: list[str] = []
         runtime = get_runtime(model.runtime) if model.runtime else None
         if runtime and runtime.pip_module and runtime.pip_package:
@@ -464,6 +572,47 @@ class ServerManager:
         )
         if result.returncode != 0:
             self.display.server_install_failed(result.stderr.strip().splitlines()[-10:])
+            return False
+        self.display.server_installed()
+        return True
+
+    def _ensure_setup_script(
+        self,
+        script_name: str,
+        sentinel: Path,
+        display_label: str,
+    ) -> bool:
+        """Run a setup-<runtime>.sh script once, guarded by a sentinel path.
+
+        Shared by llamacpp / kokoro-fastapi / qwen3-tts. The script is
+        expected to be idempotent — the sentinel check is a fast-path to
+        skip running it entirely when the install is already present.
+        Script output streams to the splash via `server_install_failed`
+        on failure (last 10 lines of stderr).
+        """
+        setup_script = _PROJECT_ROOT / script_name
+        if sentinel.exists():
+            return True
+        if not setup_script.exists():
+            self.display.server_install_failed(
+                [f"Setup script not found: {setup_script}"]
+            )
+            return False
+        self.display.server_installing([display_label])
+        result = subprocess.run(
+            ["bash", str(setup_script)], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout).strip().splitlines()[-10:]
+            self.display.server_install_failed(tail)
+            return False
+        if not sentinel.exists():
+            self.display.server_install_failed(
+                [
+                    f"{display_label} install reported success but sentinel "
+                    f"is missing at: {sentinel}",
+                ]
+            )
             return False
         self.display.server_installed()
         return True

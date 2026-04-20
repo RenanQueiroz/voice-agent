@@ -2,7 +2,7 @@
 
 A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). It uses a 3-model pipeline (STT, LLM, TTS) where each role can be cloud (OpenAI API / Gemini) or local (whisper.cpp / llama.cpp / MLX on Apple Silicon) independently. The terminal UI is a fullscreen Textual app with clickable controls and flicker-free streaming.
 
-Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cloud role; MLX is Apple-Silicon-only and is filtered out of the catalog on Linux). On **Windows** run the app through [WSL2](https://learn.microsoft.com/windows/wsl/install).
+Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + Kokoro-FastAPI / Qwen3-TTS for local TTS on NVIDIA, plus any cloud role; MLX is Apple-Silicon-only and is filtered out of the catalog on Linux). On **Windows** run the app through [WSL2](https://learn.microsoft.com/windows/wsl/install).
 
 ## Features
 
@@ -21,14 +21,14 @@ Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cl
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
 - **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
-- **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-lm` / `mlx-vlm` / `mlx-audio`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
+- **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-lm` / `mlx-vlm` / `mlx-audio` / `kokoro-fastapi` / `qwen3-tts`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
 - **Per-turn metrics**: STT, LLM (with TTFT), TTS, and total timing inline with each turn.
 
 ## Prerequisites
 
 - **Operating system**:
   - **macOS** on Apple Silicon (M1/M2/M3/M4) — all local runtimes available.
-  - **Linux** (x86_64 or aarch64) — `whispercpp` (STT) and `llamacpp` (LLM) for local roles; MLX-backed entries are filtered out since the `mlx` package has no Linux wheels. Local TTS is not supported on Linux today — pair a local STT/LLM with a cloud TTS (OpenAI or Gemini), or run everything cloud.
+  - **Linux** (x86_64 or aarch64) — `whispercpp` (STT), `llamacpp` (LLM), and (with NVIDIA GPU) `kokoro-fastapi` / `qwen3-tts` for local TTS. MLX-backed entries are filtered out since the `mlx` package has no Linux wheels.
   - **Windows**: not supported natively — install [WSL2](https://learn.microsoft.com/windows/wsl/install) and run the app from a Linux shell.
 - **Python 3.14+**
 - **[uv](https://docs.astral.sh/uv/)** package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
@@ -40,7 +40,7 @@ Runs on **macOS** (all runtimes) and **Linux** (llama.cpp + whisper.cpp + any cl
   macOS ships PortAudio bundled in the `sounddevice` wheel, so none of the above apply.
 - **ffmpeg** (local whisper STT only) — `whisper-server` uses it for audio transcoding via `--convert`. Auto-installed by `setup-whispercpp.sh` via the detected package manager.
 - **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
-- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON`. `setup-llamacpp.sh` also builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt.
+- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON`. `setup-llamacpp.sh` also builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt. Local TTS on Linux (`kokoro-fastapi`, `qwen3-tts`) also needs NVIDIA — `kokoro-fastapi` pulls `torch+cu129` (driver ≥550), `qwen3-tts` pulls `torch+cu121` (driver ≥535) and additionally builds `flash-attn` in its venv (see [Linux local TTS](#linux-local-tts-kokoro-fastapi--qwen3-tts) below).
 - An **OpenAI** and/or **Gemini API key** for any cloud role.
 
 ## Quick start
@@ -140,13 +140,15 @@ suffix is added automatically from `provider` — don't include it in `name`.
 
 Local entries must declare a `runtime`; allowed values per role:
 
-| Role | Runtime       | OS support        |
-|------|---------------|-------------------|
-| stt  | `whispercpp`  | darwin, linux     |
-| llm  | `llamacpp`    | darwin, linux     |
-| llm  | `mlx-lm`      | darwin only       |
-| llm  | `mlx-vlm`     | darwin only       |
-| tts  | `mlx-audio`   | darwin only       |
+| Role | Runtime           | OS support        |
+|------|-------------------|-------------------|
+| stt  | `whispercpp`      | darwin, linux     |
+| llm  | `llamacpp`        | darwin, linux     |
+| llm  | `mlx-lm`          | darwin only       |
+| llm  | `mlx-vlm`         | darwin only       |
+| tts  | `mlx-audio`       | darwin only       |
+| tts  | `kokoro-fastapi`  | linux only (CUDA) |
+| tts  | `qwen3-tts`       | linux only (CUDA) |
 
 Entries whose runtime doesn't run on the current OS are dropped from the
 catalog at startup, and if `preferences.toml` points at a dropped entry
@@ -207,14 +209,32 @@ reasoning_effort = "minimal"            # otherwise TTFT is ~16s on Gemini 3 pre
 api_key          = "${GEMINI_API_KEY_LEGACY}"
 
 # ── TTS catalog ─────────────────────────────────────
-# NOTE: No local TTS runtime is available on Linux today. Stick to cloud
-# TTS entries on Linux, or pair a local STT/LLM with cloud TTS.
 [[tts]]
 name     = "kokoro"
 provider = "local"
-runtime  = "mlx-audio"
+runtime  = "mlx-audio"                   # macOS-only; auto-filtered on Linux
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
+
+# Linux + NVIDIA (CUDA 12.9-capable driver). Installed into ./kokoro-fastapi/
+# on first switch by setup-kokoro-fastapi.sh.
+[[tts]]
+name     = "kokoro-fastapi"
+provider = "local"
+runtime  = "kokoro-fastapi"
+model    = "kokoro"                      # OpenAI-compat model id
+voice    = "af_heart"
+
+# Linux + NVIDIA (CUDA 12.1-capable driver). Installed into ./qwen3-tts/ on
+# first switch by setup-qwen3-tts.sh; uses the `optimized` backend with
+# torch.compile, CUDA graphs, and flash-attn.
+[[tts]]
+name     = "qwen3-tts"
+provider = "local"
+runtime  = "qwen3-tts"
+model    = "qwen3-tts"
+voice    = "Vivian"
+# instruct = "Speak in a warm, conversational tone."  # free-form style control
 
 # Voice cloning with CSM (local only, mlx-audio). Both fields required together.
 # `ref_audio` is resolved relative to the project root.
@@ -408,6 +428,34 @@ voice-agent/
 | `./setup.sh --update`     | Update all dependencies                                             |
 | `./setup-llamacpp.sh`     | Install/update `llama-server` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
 | `./setup-whispercpp.sh`   | Build whisper.cpp and download the selected whisper model           |
+| `./setup-kokoro-fastapi.sh` | Clone Kokoro-FastAPI into `./kokoro-fastapi/` + venv + `torch+cu129` + Kokoro-82M model download (Linux+CUDA, auto-invoked on first switch) |
+| `./setup-qwen3-tts.sh`    | Clone Qwen3-TTS into `./qwen3-tts/` + venv + `torch+cu121` + flash-attn (Linux+CUDA, auto-invoked on first switch) |
+
+## Linux local TTS (kokoro-fastapi / qwen3-tts)
+
+Both backends run without Docker, each in its own cloned repo + uv venv
+(torch versions conflict — they can't share a venv). The setup scripts
+are auto-invoked the first time you pick the corresponding TTS entry in
+the Settings modal, or you can run them manually:
+
+```bash
+./setup-kokoro-fastapi.sh      # ~3–5 min (clones repo, installs torch+cu129, downloads Kokoro-82M)
+./setup-qwen3-tts.sh           # ~5–15 min (clones repo, installs torch+cu121, builds flash-attn)
+```
+
+**Disk footprint:** roughly 5 GB for kokoro-fastapi (torch+cu129 venv + model) and 8 GB for qwen3-tts (torch+cu121 venv + flash-attn + HF model cache).
+
+**Qwen3 flash-attn build.** The optimized backend requires `flash-attn`, and flash-attn does not publish PyPI wheels for every `(python, torch, cuda)` combo — the setup script builds it from source. That means you need the **CUDA Toolkit** (`nvcc`) installed and reachable on `PATH` (or under `/usr/local/cuda/bin` / `/opt/cuda/bin`). The build takes 20–60 minutes. On memory-constrained hosts (<16 GB RAM), export `MAX_JOBS=2` before running the script to keep the source build from OOMing:
+
+```bash
+MAX_JOBS=2 ./setup-qwen3-tts.sh
+```
+
+If the build fails, setup exits non-zero — flash-attn is not optional for this runtime.
+
+**Qwen3 first-boot warmup.** The server launches quickly but the first TTS request is slow: the 0.6B model downloads from Hugging Face (~1.2 GB, cached under `./.cache/qwen3-tts/hf/`), then torch.compile's max-autotune + CUDA graph capture + a 3-pass warmup add up to 60–120 s before audio starts flowing. The runtime's health probe waits on `{"status": "healthy"}`, not just HTTP 200, so the splash shows a "Waiting…" heartbeat instead of falsely reporting ready. Subsequent boots reuse `./.cache/qwen3-tts/torchinductor/` and warm up in ~30 s.
+
+**Voice / instruct.** Kokoro-FastAPI exposes the full 66-voice catalog via `voice = "af_heart"` etc. (mixing supported: `"af_bella+af_sky"`). Qwen3-TTS has 9 CustomVoice speakers (`Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee`) and accepts a free-form `instruct = "..."` style control (e.g. `"Speak in a warm, conversational tone"`).
 
 ## Development
 
@@ -425,7 +473,7 @@ uv run python -m voice-agent
 When any role is local, its server logs land in `logs/`:
 
 - `logs/whisper-server_port_9000.log`
-- `logs/mlx-audio_port_8000.log`
+- `logs/mlx-audio_port_8000.log` / `logs/kokoro-fastapi_port_8000.log` / `logs/qwen3-tts_port_8000.log`
 - `logs/llama-server_port_8080.log` / `logs/mlx-vlm_port_8080.log` / `logs/mlx-lm_port_8080.log`
 
 On an API error the tail of the relevant log is rendered as an inline card.
@@ -435,7 +483,10 @@ On an API error the tail of the relevant log is rendered as an inline card.
 Each local role has exactly one backing process, started on demand, selected by the active model's `runtime`:
 
 - **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server with built-in VAD. Runs on macOS and Linux. Restarted when you pick a different local STT model.
-- **mlx-audio** (TTS, port 8000) — `runtime = "mlx-audio"`. macOS-only. Model-agnostic; the TTS model is specified per request, so swapping between local TTS models does **not** require a restart.
+- **TTS servers** (port 8000) — which one runs depends on the active TTS entry's `runtime`:
+  - `runtime = "mlx-audio"` — macOS-only. Model-agnostic; swapping between mlx-audio TTS entries does **not** require a restart.
+  - `runtime = "kokoro-fastapi"` — Linux + CUDA. FastAPI server at `./kokoro-fastapi/`, launched via its own uv venv. Kokoro-82M model downloaded on first run (~80 MB).
+  - `runtime = "qwen3-tts"` — Linux + CUDA. FastAPI server at `./qwen3-tts/` running the `optimized` backend (torch.compile + CUDA graphs + flash-attn). First boot lazy-downloads the model from Hugging Face (0.6B ≈ 1.2 GB) and pays a ~75s torch.compile cost; subsequent boots reuse `.cache/qwen3-tts/torchinductor/`.
 - **LLM server** (port 8080) — backend is per-entry:
   - `runtime = "llamacpp"` — `llama-server` binary, health via `/health`, models from the preset file. Runs on macOS and Linux.
   - `runtime = "mlx-lm"` — Python module, health via `/v1/models`. macOS-only.
