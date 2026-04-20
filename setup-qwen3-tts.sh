@@ -2,28 +2,34 @@
 set -euo pipefail
 
 # Installs Qwen3-TTS-Openai-Fastapi into ./qwen3-tts/ with its own uv venv
-# for the `optimized` backend (torch.compile + CUDA graphs + flash-attn +
-# real token-by-token PCM streaming).
+# for the `optimized` backend (torch.compile + CUDA graphs + flash-attn-3
+# via HF kernels + real token-by-token PCM streaming).
 #
 # Requirements:
-#   - Linux + NVIDIA GPU (CUDA 12.1-compatible driver, typically ≥535).
+#   - Linux + NVIDIA GPU (CUDA 12.8-compatible driver; drivers ≥525 typically
+#     satisfy this since CUDA runtime versioning is backward-compatible).
 #   - uv  (https://astral.sh/uv)
 #   - A detected package manager: apt / dnf / pacman / zypper
-#   - ~10 GB free disk for torch+flash-attn+venv, plus ~1.2 GB for the 0.6B
-#     model on first request.
+#   - ~8 GB free disk for venv+model (down from ~12 GB in the old
+#     flash-attn-2-source-build setup).
 #
-# flash-attn build: the optimized backend works best with flash-attn 2. We
-# try the prebuilt wheel first (`--only-binary=:all:`); if no matching wheel
-# exists for the host's (python, torch, cuda) combo we fall back to a source
-# build via `--no-build-isolation`. Either way the install is REQUIRED — the
-# script exits non-zero if both paths fail. Pass `MAX_JOBS=2` (or similar)
-# in the environment on memory-constrained hosts (<16 GB RAM) to keep the
-# source build from OOMing.
+# Attention backend: we use `attn_implementation="kernels-community/flash-
+# attn3"`, which causes transformers to download a pre-built flash-attn 3
+# kernel from HF Hub at model-load time — no nvcc, no source compilation,
+# no 20-60 min wait. The kernel matches the upstream `Qwen/Qwen3-TTS` HF
+# Space setup. On Ada (RTX 40xx) the runtime speedup over flash-attn 2
+# is modest (it's a Hopper-optimized kernel), but combined with torch 2.8
+# it delivers RTF ~0.5× (well under realtime) on an RTX 4080 Laptop.
+#
+# Version lock-in: `kernels<0.10` pins us to the 0.9.x line, which is the
+# last release compatible with `huggingface-hub<1.0` (which transformers
+# 4.57.3 requires). Bumping `kernels` past that will break the backend
+# init with a transformers-vs-hub version-compat error.
 #
 # Idempotency:
 #   We stamp ./qwen3-tts/.installed with the checked-out commit SHA. If the
-#   stamp matches the pinned ref AND the venv + flash-attn import still
-#   work, re-running is a no-op.
+#   stamp matches the pinned ref AND the venv imports torch + torchaudio +
+#   kernels + loads the flash-attn3 kernel, re-running is a no-op.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$DIR/qwen3-tts"
@@ -157,8 +163,8 @@ current_repo_sha() {
 # with variable kwargs, so every distinct (shape, kwargs) combo takes a
 # cache slot. The default (8) is too tight — once saturated, dynamo
 # stops compiling and falls back to eager for new combos, which kills
-# RTF. Torch 2.5.1 has no env var for this, so inject it via Python's
-# site initialization.
+# RTF. No env var exposes this (as of torch 2.8), so inject it via
+# Python's site initialization.
 #
 # We drop TWO files in the venv's site-packages:
 #
@@ -396,6 +402,17 @@ apply_config_optimizations() {
             "$cfg"
         echo "Patched config.yaml: use_cuda_graphs: false -> true"
     fi
+    # Flip attention from flash_attention_2 to the HF kernels-community
+    # flash-attn 3 build. Matches the upstream `Qwen/Qwen3-TTS` Space
+    # (`huggingface.co/spaces/Qwen/Qwen3-TTS`) and eliminates the 20-60
+    # min flash-attn source build we used to do — the kernel is
+    # downloaded pre-built from HF Hub at model-load time.
+    if grep -qE '^[[:space:]]*attention:[[:space:]]*flash_attention_2[[:space:]]*$' "$cfg"; then
+        sed -i -E \
+            's|^([[:space:]]*)attention:[[:space:]]*flash_attention_2[[:space:]]*$|\1attention: kernels-community/flash-attn3|' \
+            "$cfg"
+        echo "Patched config.yaml: attention: flash_attention_2 -> kernels-community/flash-attn3"
+    fi
 }
 
 # Small helper: check if a module is importable in the venv.
@@ -403,12 +420,13 @@ venv_has() {
     "$VENV_PY" -c "import $1" &>/dev/null
 }
 
-# The torch+torchaudio+flash-attn stack is extremely sensitive to version
-# skew — torchaudio's compiled .so expects an exact torch version, and
-# flash-attn's compiled kernels expect a specific torch ABI. This check
-# verifies: both modules import cleanly AND torch reports cu121. When it
-# returns false we know we need to re-pin both together.
-venv_has_cuda121_torch_stack() {
+# torch + torchaudio must be on cu128 (matching the torch 2.8 release
+# line) so the `kernels-community/flash-attn3` pre-built variants match
+# our (torch, cuda) tuple. torchaudio's compiled .so also expects an
+# exact torch version, so a mismatch between the two produces an
+# `OSError: libtorchaudio.so: undefined symbol` at import. When this
+# check returns false we know we need to re-pin both together.
+venv_has_cu128_torch_stack() {
     "$VENV_PY" <<'PY' &>/dev/null
 import sys
 try:
@@ -416,7 +434,13 @@ try:
 except Exception:
     sys.exit(1)
 cuda = (getattr(torch.version, "cuda", "") or "")
-sys.exit(0 if cuda.startswith("12.1") else 1)
+# 12.8 (current) or newer 12.x line — reject older (cu12.1, cu12.4, etc.)
+# that won't have a matching flash-attn3 kernel variant.
+if not cuda.startswith("12.8"):
+    sys.exit(1)
+# torch version should be the 2.8.x line — anything older predates the
+# kernels variants and anything much newer may shift the ABI.
+sys.exit(0 if torch.__version__.startswith("2.8.") else 1)
 PY
 }
 
@@ -447,6 +471,22 @@ sys.exit(0 if c.cache_size_limit >= 64 else 1)
 PY
 }
 
+# Confirm the `kernels` library is present AND can load the flash-attn3
+# kernel for our (torch, cuda) combo. If kernels is missing, or the
+# kernel registry has no matching variant, the backend falls back to
+# sdpa at runtime (still works, but ~2× slower than fa3). Catch this
+# here instead of later.
+venv_has_fa3_kernel() {
+    "$VENV_PY" <<'PY' &>/dev/null
+import sys
+try:
+    from kernels import get_kernel
+    get_kernel("kernels-community/flash-attn3")
+except Exception:
+    sys.exit(1)
+PY
+}
+
 venv_pip() {
     (cd "$INSTALL_DIR" && VIRTUAL_ENV="$INSTALL_DIR/.venv" uv pip "$@")
 }
@@ -469,8 +509,8 @@ if [ -x "$VENV_PY" ] && [ -f "$STAMP_FILE" ] && [ -d "$INSTALL_DIR/.git" ]; then
     stamped=$(cat "$STAMP_FILE")
     head_sha=$(current_repo_sha)
     if [ "$stamped" = "$head_sha" ] \
-        && venv_has_cuda121_torch_stack \
-        && venv_has flash_attn \
+        && venv_has_cu128_torch_stack \
+        && venv_has_fa3_kernel \
         && venv_has_python_headers \
         && venv_has_dynamo_cache_bump; then
         echo "qwen3-tts already installed at $head_sha — nothing to do."
@@ -489,109 +529,77 @@ clone_or_update
 apply_config_optimizations
 apply_source_patches
 
-# nvcc needs to be present before we reach the flash-attn source build
-# (which takes 20-60 min and can OOM on <16GB RAM boxes — see MAX_JOBS note
-# below). Probe common install paths before giving up so the error message
-# is actionable.
-if ! command -v nvcc &>/dev/null; then
-    for p in /usr/local/cuda/bin /opt/cuda/bin; do
-        if [ -x "$p/nvcc" ]; then
-            export PATH="$p:$PATH"
-            break
-        fi
-    done
-fi
-if ! command -v nvcc &>/dev/null; then
-    echo "Error: nvcc (CUDA Toolkit) is required to build flash-attn from source." >&2
-    echo "  Install: https://developer.nvidia.com/cuda-downloads" >&2
-    echo "  After install, ensure nvcc is in PATH (typically /usr/local/cuda/bin)." >&2
-    exit 1
-fi
-
 # --- Venv ---
 
 if [ ! -x "$VENV_PY" ]; then
-    echo "Creating uv venv (Python 3.12 — best flash-attn wheel coverage)..."
+    echo "Creating uv venv (Python 3.12)..."
     rm -rf "$INSTALL_DIR/.venv"
     (cd "$INSTALL_DIR" && uv venv --python 3.12 .venv)
 fi
 
-# --- flash-attn build deps ---
-#
-# flash-attn's setup.py imports torch to detect the CUDA version at build
-# time and shells out to ninja + nvcc to compile the kernels. With
-# --no-build-isolation these must be present in the venv when the build
-# subprocess runs — missing `wheel` produces an opaque
-# `ModuleNotFoundError: wheel` from setuptools.build_meta. Install them
-# up front.
-echo "Ensuring flash-attn build deps are present (wheel, setuptools, ninja, packaging)..."
-venv_pip install -U wheel setuptools ninja packaging
-
 # --- qwen-tts with [api] extra ---
 #
 # Install this FIRST, before pinning torch. pyproject leaves torch
-# unpinned, so if we install cu121 torch first then run this, uv happily
+# unpinned, so if we install cu128 torch first then run this, uv happily
 # upgrades torch to the latest PyPI wheel (torch 2.11.0+cu130 at the
-# time of writing) — which skews torchaudio, breaks flash-attn, and
-# leaves the backend unable to load libtorchaudio.so at startup. Letting
-# the api install pull whatever torch it wants, then force-replacing it
-# below, is the only ordering where both packages land on cu121 together.
+# time of writing) — which skews torchaudio and breaks the kernels-
+# community/flash-attn3 match (no variant exists for that combo).
+# Letting the api install pull whatever torch it wants, then force-
+# replacing it below, is the only ordering where both packages land on
+# cu128 together.
 if ! venv_has qwen_tts; then
     echo "Installing qwen-tts with the [api] extra..."
     venv_pip install -e ".[api]"
 fi
 
-# --- Pin torch + torchaudio to cu121 (force-replace whatever -e .[api] pulled) ---
+# --- Pin torch + torchaudio to 2.8.0+cu128 (force-replace whatever -e .[api] pulled) ---
 #
 # --reinstall on BOTH packages in ONE call keeps them version-locked to
-# each other; installing them separately races against uv's resolver and
-# can land on mismatched versions. We also trigger this when the current
-# stack is broken (import failure or wrong CUDA), which is how the fix
-# propagates to users with already-corrupted venvs.
-if ! venv_has_cuda121_torch_stack; then
-    echo "Installing torch + torchaudio (cu121) — force-replacing any mismatched/CPU torch..."
-    venv_pip install --reinstall torch torchaudio \
-        --index-url https://download.pytorch.org/whl/cu121
-    # flash-attn was compiled against whatever torch was in the venv
-    # when it was built. If torch just changed, flash-attn's kernels
-    # ABI-mismatch and its import breaks at runtime — force a rebuild.
-    FLASH_ATTN_NEEDS_REBUILD=1
-else
-    FLASH_ATTN_NEEDS_REBUILD=0
+# each other. torch 2.8 + cu128 matches the upstream HF `Qwen/Qwen3-TTS`
+# Space and is in the kernels-community/flash-attn3 variant matrix. If
+# you bump these, pick a pair with a matching variant at
+# https://huggingface.co/kernels-community/flash-attn3/tree/main/build.
+if ! venv_has_cu128_torch_stack; then
+    echo "Installing torch 2.8.0 + torchaudio 2.8.0 (cu128) — force-replacing any mismatched install..."
+    venv_pip install --reinstall torch==2.8.0 torchaudio==2.8.0 \
+        --index-url https://download.pytorch.org/whl/cu128
 fi
 
-# --- flash-attn (required, source build) ---
+# --- kernels (flash-attn 3 pre-built) ---
 #
-# Skip the "try prebuilt first" dance because flash-attn publishes its
-# prebuilt wheels on GitHub releases (not PyPI), and uv resolving against
-# PyPI with --only-binary produces an unsatisfiable-deps error. Go
-# straight to source — slow but reliable given the nvcc check and
-# pre-installed build deps.
+# `kernels<0.10` pins the 0.9.x line, which is compatible with
+# `huggingface-hub<1.0` — transformers 4.57.3 (what qwen-tts pins)
+# requires hub<1.0, and kernels 0.13+ would pull hub 1.x, leading to a
+# `huggingface-hub<1.0 is required` error at model load. Keep this pin
+# until transformers is upgraded past the boundary.
 #
-# `--no-deps` is LOAD-BEARING: flash-attn's pyproject lists torch as a
-# dependency, and without --no-deps uv happily re-resolves torch (plus
-# triton, nvidia-* runtime libs, etc.) against the default PyPI index,
-# clobbering the cu121 pin we just applied above. We install flash-attn
-# on top of an already-configured torch; there's nothing else to resolve.
-if [ "$FLASH_ATTN_NEEDS_REBUILD" = "1" ] || ! venv_has flash_attn; then
-    echo
-    echo "Building flash-attn from source. This usually takes 20-60 minutes."
-    echo "  On hosts with <16GB RAM, re-run this script with MAX_JOBS=2 in env."
-    echo
-    INSTALL_FLAGS=(-U --no-deps flash-attn --no-build-isolation)
-    if [ "$FLASH_ATTN_NEEDS_REBUILD" = "1" ]; then
-        # --reinstall drops the stale .so so the new build actually replaces it.
-        INSTALL_FLAGS=(--reinstall "${INSTALL_FLAGS[@]}")
-    fi
-    if ! venv_pip install "${INSTALL_FLAGS[@]}"; then
-        echo "Error: flash-attn install failed." >&2
-        echo "  Likely causes:" >&2
-        echo "    - Not enough RAM for the source build (try MAX_JOBS=2)." >&2
-        echo "    - Mismatched torch / CUDA versions in the venv." >&2
-        echo "    - nvcc on a different CUDA version than the torch wheel." >&2
-        echo "  The optimized backend requires flash-attn; setup cannot continue." >&2
-        exit 1
-    fi
+# The actual flash-attn 3 kernel binary is downloaded from HF Hub at
+# model-load time (via `attn_implementation="kernels-community/flash-
+# attn3"`), not here — this just installs the runtime that resolves
+# that URL.
+if ! venv_has kernels; then
+    echo "Installing kernels (flash-attn 3 runtime)..."
+    venv_pip install 'kernels<0.10'
+fi
+
+# --- Clean up stale flash-attn 2 pip package ---
+#
+# An earlier version of this setup built flash-attn 2 from source. After
+# the torch 2.5 → 2.8 upgrade that .so is ABI-broken, so `import
+# flash_attn` fails at runtime. That triggers a misleading
+# "Warning: flash-attn is not installed" log line from
+# qwen_tts/core/tokenizer_25hz/vq/whisper_encoder.py, which has its own
+# direct `import flash_attn` fallback chain (a separate code path from
+# the kernels-community/flash-attn3 we use for the main decoder).
+#
+# Uninstall the stale package so the warning at least reports accurately
+# and we reclaim ~150 MB. The whisper encoder falls back to a manual
+# PyTorch attention path — not a hot-path for CustomVoice inference, so
+# no measurable perf impact. The `--quiet` redirect keeps the output
+# clean when the package is already absent.
+if venv_pip list 2>/dev/null | grep -q '^flash-attn '; then
+    echo "Removing stale flash-attn (ABI-broken against torch 2.8; warning is cosmetic but misleading)..."
+    venv_pip uninstall -q flash-attn
 fi
 
 write_sitecustomize
@@ -607,14 +615,18 @@ echo "Verifying qwen3-tts install..."
 if ! "$VENV_PY" <<'PY'
 import os, sys, sysconfig
 try:
-    import torch, torchaudio, flash_attn
+    import torch, torchaudio, kernels
     import torch._dynamo.config as dynamo_cfg
+    from kernels import get_kernel
 except Exception as e:
     print(f"  import failed: {e}", file=sys.stderr)
     sys.exit(1)
 cuda = (getattr(torch.version, "cuda", "") or "")
-if not cuda.startswith("12.1"):
-    print(f"  torch is on cuda {cuda!r}, expected 12.1.x", file=sys.stderr)
+if not cuda.startswith("12.8"):
+    print(f"  torch is on cuda {cuda!r}, expected 12.8.x", file=sys.stderr)
+    sys.exit(1)
+if not torch.__version__.startswith("2.8."):
+    print(f"  torch {torch.__version__} — expected 2.8.x (kernels variants are pinned to this)", file=sys.stderr)
     sys.exit(1)
 # torch.compile / Triton compiles helper .so files against Python.h at
 # runtime. Catch missing dev headers here rather than mid-audio-generation.
@@ -626,13 +638,23 @@ if not os.path.exists(header):
 if dynamo_cfg.cache_size_limit < 64:
     print(f"  torch._dynamo.cache_size_limit={dynamo_cfg.cache_size_limit} — sitecustomize didn't load", file=sys.stderr)
     sys.exit(1)
-print(f"  torch {torch.__version__}, torchaudio {torchaudio.__version__}, flash_attn {flash_attn.__version__}")
+# Confirm the flash-attn3 kernel resolves for our (torch, cuda) combo.
+# This downloads the kernel from HF Hub on the first call (cached under
+# ~/.cache/huggingface), so subsequent model loads are instant.
+try:
+    get_kernel("kernels-community/flash-attn3")
+except Exception as e:
+    print(f"  flash-attn3 kernel load failed: {e}", file=sys.stderr)
+    print(f"  Available variants: see https://huggingface.co/kernels-community/flash-attn3/tree/main/build", file=sys.stderr)
+    sys.exit(1)
+print(f"  torch {torch.__version__}, torchaudio {torchaudio.__version__}")
+print(f"  kernels (flash-attn3 kernel loaded OK)")
 print(f"  dynamo cache_size_limit={dynamo_cfg.cache_size_limit}")
 PY
 then
     echo "Error: post-install verification failed — refusing to stamp." >&2
     echo "  Inspect the venv manually:" >&2
-    echo "    $VENV_PY -c 'import torch, torchaudio, flash_attn; print(torch.__version__, torchaudio.__version__, flash_attn.__version__)'" >&2
+    echo "    $VENV_PY -c 'import torch, torchaudio, kernels; print(torch.__version__, torchaudio.__version__)'" >&2
     exit 1
 fi
 

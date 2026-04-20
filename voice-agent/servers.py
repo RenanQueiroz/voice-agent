@@ -10,6 +10,7 @@ local model for that role.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 import shutil
 import signal
@@ -25,6 +26,44 @@ import httpx
 from .config import ModelConfig, Settings
 from .platform_info import current_os, linux_package_manager
 from .runtimes import RUNTIMES, Runtime, get_runtime
+
+
+# Linux prctl constant; SIGKILL when parent dies. See prctl(2).
+_PR_SET_PDEATHSIG = 1
+
+
+def _subprocess_setup_linux() -> None:
+    """Run in the child right after fork, before exec.
+
+    Sets up two kernel-level cleanup guarantees so that aggressive
+    user signals (e.g. Ctrl+C chains, hard crashes) don't leave
+    orphan subprocesses holding VRAM and ports:
+
+    1. `setsid()` — put the child in its own session + process group,
+       so we can later `killpg(pid, SIGKILL)` and take out the whole
+       subtree (main server + every inductor compile worker it spawns)
+       in one syscall.
+    2. `prctl(PR_SET_PDEATHSIG, SIGKILL)` — tell the kernel to send
+       SIGKILL to this process if our parent process dies. Catches the
+       case where our Python process is hard-killed without running
+       its own cleanup handlers. Linux-only; on other kernels the
+       setsid part still helps with normal shutdown.
+    """
+    os.setsid()
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except Exception:
+        # If prctl isn't available (musl, non-Linux libc, etc.) we
+        # still have setsid + our own graceful killpg on shutdown.
+        pass
+
+
+def _subprocess_setup_darwin() -> None:
+    """Same as the linux variant but without pdeathsig (doesn't exist
+    on darwin). setsid alone still enables killpg-based cleanup."""
+    os.setsid()
+
 
 if TYPE_CHECKING:
     from .display import Display
@@ -52,6 +91,13 @@ class ServerManager:
         self._started_for: dict[Role, str] = {}
         # Track which local role has had deps installed already this session.
         self._deps_ready: set[Role] = set()
+
+        # Reap any orphan servers left over from a previous app session
+        # that didn't shut down cleanly (e.g. user mashed Ctrl+C and our
+        # cleanup handlers got skipped). Without this, reconcile() would
+        # fail with "port already in use" AND the orphans would keep
+        # holding VRAM / file handles until manually killed.
+        self._reap_orphan_servers()
 
     # ── Public API ────────────────────────────────────────
 
@@ -278,6 +324,17 @@ class ServerManager:
         # instead of staring at a stalled spinner.
         self.display.server_starting(display_name, log_path)
         log_file = open(log_path, "w")  # noqa: SIM115
+        # preexec_fn isolates the child in its own process group (via
+        # setsid) AND — on Linux — registers PR_SET_PDEATHSIG=SIGKILL
+        # so the kernel reaps it even if our Python process is hard-
+        # killed. See _subprocess_setup_linux docstring.
+        preexec: object | None
+        if sys.platform.startswith("linux"):
+            preexec = _subprocess_setup_linux
+        elif sys.platform == "darwin":
+            preexec = _subprocess_setup_darwin
+        else:
+            preexec = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -286,6 +343,7 @@ class ServerManager:
                 text=True,
                 cwd=str(cwd) if cwd else None,
                 env=env,
+                preexec_fn=preexec,  # type: ignore[arg-type]
             )
         except FileNotFoundError as e:
             self.display.server_failed(display_name, [str(e)])
@@ -367,6 +425,93 @@ class ServerManager:
         self.display.server_timeout(display_name, STARTUP_TIMEOUT)
         return False
 
+    def _reap_orphan_servers(self) -> None:
+        """Kill any subprocesses left behind by a previous app session.
+
+        Matches processes by the first argument of their cmdline — we
+        only terminate things whose entrypoint binary lives under one
+        of the vendored server directories we control. This is
+        deliberately narrow: a user's own un-related uvicorn / python
+        process has no reason to launch from `./qwen3-tts/.venv/bin/`
+        etc., so matching on that path means no collateral damage.
+
+        Runs once per ServerManager (so once per app launch), sync, on
+        Linux and macOS. `/proc` scan is the only reliable source on
+        Linux; we fall back to `pgrep` on macOS.
+        """
+        signatures = [
+            str(_PROJECT_ROOT / "kokoro-fastapi" / ".venv" / "bin" / "python"),
+            str(_PROJECT_ROOT / "qwen3-tts" / ".venv" / "bin" / "python"),
+            str(_PROJECT_ROOT / "whispercpp" / "whisper-server"),
+            str(_PROJECT_ROOT / "llamacpp" / "llama-server"),
+        ]
+        my_pid = os.getpid()
+        orphans: list[int] = []
+
+        proc_dir = Path("/proc")
+        if proc_dir.exists():
+            # Linux path: read /proc/*/cmdline
+            for entry in proc_dir.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                if pid == my_pid:
+                    continue
+                try:
+                    raw = (entry / "cmdline").read_bytes()
+                except OSError, PermissionError:
+                    continue
+                # cmdline is null-separated argv; we only care about argv[0]
+                argv0 = raw.split(b"\x00", 1)[0].decode(errors="replace")
+                if any(argv0.startswith(sig) for sig in signatures):
+                    orphans.append(pid)
+        else:
+            # Fallback: use pgrep -f with each signature
+            for sig in signatures:
+                try:
+                    result = subprocess.run(
+                        ["pgrep", "-f", sig],
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                except FileNotFoundError, subprocess.TimeoutExpired:
+                    return  # no pgrep available; give up
+                for line in result.stdout.strip().splitlines():
+                    try:
+                        pid = int(line.strip())
+                    except ValueError:
+                        continue
+                    if pid != my_pid:
+                        orphans.append(pid)
+
+        if not orphans:
+            return
+
+        # Send SIGTERM to the whole process group (each orphan should be
+        # a session leader from its own _launch). SIGKILL stragglers
+        # after a short grace period.
+        for pid in orphans:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError, PermissionError:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError, PermissionError:
+                    pass
+        # Short grace period, then SIGKILL any survivors.
+        import time
+
+        time.sleep(1.0)
+        for pid in orphans:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError, PermissionError:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError, PermissionError:
+                    pass
+
     def _stop_role(self, role: Role) -> None:
         proc = self._procs.pop(role, None)
         self._log_files.pop(role, None)
@@ -374,11 +519,24 @@ class ServerManager:
         if proc is None:
             return
         if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
+            # Because _launch uses preexec_fn=os.setsid, the subprocess
+            # is a session leader with pgid == pid and every descendant
+            # (e.g. the 30+ torch inductor compile workers qwen spawns)
+            # lives in the same session. Signal the whole group so we
+            # don't leave VRAM-holding children behind.
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError, PermissionError:
+                # Fall back to the direct-proc signal if the group is
+                # already gone or we can't signal it.
+                proc.send_signal(signal.SIGTERM)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError, PermissionError:
+                    proc.kill()
 
     # ── Helpers ───────────────────────────────────────────
 

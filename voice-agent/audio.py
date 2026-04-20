@@ -209,22 +209,32 @@ class AudioPlayer:
         """Stream TTS audio to speakers.
         Returns (tts_total_seconds, tts_first_byte_seconds)."""
         self._stopped = False
-        # `latency="high"` (and the matching blocksize = 0.1s) tells
-        # PortAudio to request a generous output buffer instead of the
-        # ~5-10ms default. Without that cushion, any producer jitter
-        # (TTS network hiccup, Qwen3 inter-chunk gap, scheduler stall)
-        # drains the hardware queue and ALSA reports "underrun_occurred",
-        # which manifests as clicks / glitches in playback. An extra
-        # 50-100ms of one-way latency is inaudible for voice response
-        # and buys a lot of smoothness.
+        # PortAudio output buffering. Two knobs working together:
+        #
+        #  * `latency="high"` tells PortAudio to request the host's
+        #    generous latency tier (vs. ~5-10 ms default on low).
+        #  * `blocksize=4800` (200 ms at 24 kHz) sets the per-write
+        #    chunk the stream expects — larger blocksize means more
+        #    samples can sit in flight before the hardware drains,
+        #    giving producer jitter (TTS network hiccups, GC pauses,
+        #    event-loop stalls) a wider window to recover in. An extra
+        #    ~200 ms of one-way latency is inaudible for voice.
+        #
+        # We do NOT call `start()` yet — that would kick PortAudio into
+        # consuming samples from an empty buffer immediately, and
+        # because TTS TTFB is 100-500 ms the output would drain to
+        # silence before the first chunk lands, producing an ALSA
+        # underrun every single turn. Instead we start the stream
+        # *after* queueing the first chunk below, so consumption and
+        # production begin in lockstep.
         self._player = sd.OutputStream(
             samplerate=24000,
             channels=CHANNELS,
             dtype=np.int16,
             latency="high",
-            blocksize=2400,  # 100ms at 24 kHz — matches the latency target
+            blocksize=4800,  # 200 ms at 24 kHz
         )
-        self._player.start()
+        stream_started = False
         tts_start = time.monotonic()
         first_byte_time = 0.0
         try:
@@ -235,10 +245,18 @@ class AudioPlayer:
                     if event.type == "voice_stream_event_audio":
                         if first_byte_time == 0.0:
                             first_byte_time = time.monotonic() - tts_start
-                        if not self._stopped:
-                            await asyncio.get_event_loop().run_in_executor(
-                                None, self._player.write, event.data
-                            )
+                        if self._stopped:
+                            continue
+                        if not stream_started:
+                            # Prime the queue with the first chunk, then
+                            # start — this way PortAudio starts consuming
+                            # the moment data's available, no head-of-
+                            # stream underrun.
+                            self._player.start()
+                            stream_started = True
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self._player.write, event.data
+                        )
                     elif event.type == "voice_stream_event_lifecycle":
                         if event.event == "turn_started":
                             display.turn_started()
@@ -258,7 +276,8 @@ class AudioPlayer:
                 display.api_error(str(e))
         finally:
             if not self._player.closed:
-                self._player.stop()
+                if stream_started:
+                    self._player.stop()
                 self._player.close()
             self._player = None
         return time.monotonic() - tts_start, first_byte_time
