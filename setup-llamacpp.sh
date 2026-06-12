@@ -5,7 +5,8 @@ set -euo pipefail
 #
 #   macOS arm64, Linux CPU x86_64, Linux aarch64:
 #     Download and extract the latest prebuilt release from GitHub.
-#     Up-to-date check uses `llama-cli --version` vs. the release tag.
+#     Up-to-date check uses `llama-cli --version` vs. the release tag
+#     and requires the installed helper tools to be present.
 #
 #   Linux x86_64 + NVIDIA (nvcc in PATH):
 #     Clone ggml-org/llama.cpp and build from source with CUDA enabled,
@@ -13,7 +14,8 @@ set -euo pipefail
 #     upstream releases page has no Ubuntu+CUDA asset, so we build to
 #     get CUDA on Linux. The last-built commit SHA is recorded in
 #     ./llamacpp/.built-commit; if `git ls-remote HEAD` matches the
-#     stamp we skip the rebuild entirely.
+#     stamp and the installed helper tools are present, we skip the
+#     rebuild entirely.
 #
 # If nvcc is missing (NVIDIA driver only, no CUDA Toolkit) we fall back
 # to the CPU prebuilt with a warning — llama.cpp is still usable without
@@ -36,8 +38,24 @@ trap cleanup EXIT
 
 LLAMA_REPO="ggml-org/llama.cpp"
 LLAMA_REPO_URL="https://github.com/$LLAMA_REPO.git"
+LLAMA_BINARIES=(llama-server llama-cli llama-bench)
 
 UPDATED=0
+
+missing_llama_binaries() {
+    local missing=()
+    local bin
+    for bin in "${LLAMA_BINARIES[@]}"; do
+        if [ ! -x "$INSTALL_DIR/$bin" ]; then
+            missing+=("$bin")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        printf '%s\n' "${missing[*]}"
+    fi
+    return 0
+}
 
 # --- Detect platform ---
 
@@ -230,12 +248,18 @@ install_source_cuda() {
         local_sha=$(cat "$STAMP_FILE")
     fi
 
-    if [ "$local_sha" = "$remote_sha" ] && [ -x "$INSTALL_DIR/llama-server" ]; then
+    local missing_bins
+    missing_bins=$(missing_llama_binaries)
+
+    if [ "$local_sha" = "$remote_sha" ] && [ -z "$missing_bins" ]; then
         echo "llama.cpp is already up to date (commit ${remote_sha:0:12})."
         return 0
     fi
 
-    if [ -n "$local_sha" ]; then
+    if [ "$local_sha" = "$remote_sha" ]; then
+        echo "llama.cpp source checkout is current, but missing installed binaries: $missing_bins"
+        echo "Rebuilding/installing helper tools..."
+    elif [ -n "$local_sha" ]; then
         echo "Updating llama.cpp: ${local_sha:0:12} -> ${remote_sha:0:12}"
     else
         echo "Building llama.cpp from source at ${remote_sha:0:12}"
@@ -270,13 +294,16 @@ install_source_cuda() {
 
     echo "Building (this takes several minutes)..."
     cmake --build "$SRC_DIR/build" --config Release -j"$(nproc)" \
-        --target llama-server llama-cli
+        --target "${LLAMA_BINARIES[@]}"
 
     local build_bin="$SRC_DIR/build/bin"
-    if [ ! -x "$build_bin/llama-server" ]; then
-        echo "Error: llama-server not found after build at $build_bin." >&2
-        exit 1
-    fi
+    local bin
+    for bin in "${LLAMA_BINARIES[@]}"; do
+        if [ ! -x "$build_bin/$bin" ]; then
+            echo "Error: $bin not found after build at $build_bin." >&2
+            exit 1
+        fi
+    done
 
     echo "Installing to $INSTALL_DIR..."
     mkdir -p "$INSTALL_DIR"
@@ -310,11 +337,19 @@ install_prebuilt() {
         llama_local=$("$INSTALL_DIR/llama-cli" --version 2>&1 | grep -o 'version: [0-9]*' | cut -d' ' -f2 || echo "")
     fi
 
+    local missing_bins
+    missing_bins=$(missing_llama_binaries)
+
     # If a previous source build left a stamp, treat the install as dirty
     # and reinstall from prebuilt so we don't end up with mixed artifacts.
-    if [ "$llama_local" = "$llama_latest" ] && [ ! -f "$STAMP_FILE" ]; then
+    if [ "$llama_local" = "$llama_latest" ] && [ ! -f "$STAMP_FILE" ] && [ -z "$missing_bins" ]; then
         echo "llama.cpp is already up to date ($llama_tag)."
         return 0
+    fi
+
+    if [ "$llama_local" = "$llama_latest" ] && [ -n "$missing_bins" ]; then
+        echo "llama.cpp prebuilt is current, but missing installed binaries: $missing_bins"
+        echo "Reinstalling from the latest prebuilt..."
     fi
 
     echo "Updating llama.cpp: ${llama_local:-not installed} -> $llama_latest"
@@ -377,6 +412,14 @@ install_prebuilt() {
         echo "Error: llama-server not found inside $asset." >&2
         exit 1
     fi
+
+    local bin
+    for bin in "${LLAMA_BINARIES[@]}"; do
+        if ! find "$TMPDIR_EXTRACT" -type f -name "$bin" -perm -111 -print -quit | grep -q .; then
+            echo "Error: $bin not found inside $asset." >&2
+            exit 1
+        fi
+    done
 
     mkdir -p "$INSTALL_DIR"
     local bin_dir lib_dir

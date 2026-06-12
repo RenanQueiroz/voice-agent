@@ -40,7 +40,7 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 
   macOS ships PortAudio bundled in the `sounddevice` wheel, so none of the above apply.
 - **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
-- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with CUDA (`-DGGML_CUDA=ON`); if NVIDIA is not available it falls back to OpenBLAS CPU acceleration when available (`-DGGML_BLAS=1`), then plain CPU. `setup-llamacpp.sh` builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt. CUDA TTS on Linux (`kokoro-fastapi`, `qwen3-tts`) also needs NVIDIA — `kokoro-fastapi` pulls `torch+cu129` (driver ≥550), and `qwen3-tts` uses its own CUDA torch stack (see [Local TTS servers](#local-tts-servers) below). Supertonic is CPU-only by default and does not require NVIDIA.
+- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with CUDA (`-DGGML_CUDA=ON`); if NVIDIA is not available it falls back to OpenBLAS CPU acceleration when available (`-DGGML_BLAS=1`), then plain CPU. `setup-llamacpp.sh` builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native) and installs `llama-server`, `llama-cli`, and `llama-bench`; this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt. CUDA TTS on Linux (`kokoro-fastapi`, `qwen3-tts`) also needs NVIDIA — `kokoro-fastapi` pulls `torch+cu129` (driver ≥550), and `qwen3-tts` uses its own CUDA torch stack (see [Local TTS servers](#local-tts-servers) below). Supertonic is CPU-only by default and does not require NVIDIA.
 - An **OpenAI** and/or **Gemini API key** for any cloud role.
 
 ## Quick start
@@ -446,7 +446,7 @@ voice-agent/
 | `./start-llamacpp.sh`     | Run standalone `llama-server` on port 8080 with `llamacpp-models.ini` presets |
 | `./setup.sh`              | Install all dependencies (core + local)                             |
 | `./setup.sh --update`     | Update all dependencies                                             |
-| `./setup-llamacpp.sh`     | Install/update `llama-server` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
+| `./setup-llamacpp.sh`     | Install/update `llama-server`, `llama-cli`, and `llama-bench` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
 | `./setup-whispercpp.sh`   | Install/update whisper.cpp and download the selected whisper model (default `large-v3-turbo-q5_0`) |
 | `./setup-supertonic.sh`    | Install the official Supertonic server into `./supertonic-server/` (macOS/Linux CPU, auto-invoked on first switch) |
 | `./setup-kokoro-fastapi.sh` | Clone Kokoro-FastAPI into `./kokoro-fastapi/` + venv + `torch+cu129` + Kokoro-82M model download (Linux+CUDA, auto-invoked on first switch) |
