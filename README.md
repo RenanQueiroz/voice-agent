@@ -444,6 +444,7 @@ voice-agent/
 |---------------------------|---------------------------------------------------------------------|
 | `./start.sh`              | Run the voice agent                                                 |
 | `./start-llamacpp.sh`     | Run standalone `llama-server` on port 8080 with `llamacpp-models.ini` presets |
+| `./bench.sh`              | Benchmark any `llamacpp-models.ini` preset with `llama-bench` and an interactive model picker |
 | `./setup.sh`              | Install all dependencies (core + local)                             |
 | `./setup.sh --update`     | Update all dependencies                                             |
 | `./setup-llamacpp.sh`     | Install/update `llama-server`, `llama-cli`, and `llama-bench` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
@@ -456,6 +457,14 @@ voice-agent/
 `--models-preset ./llamacpp-models.ini`. If the binary is missing, it runs `./setup-llamacpp.sh` first.
 Override the bind address, port, or preset with `LLAMACPP_HOST`, `LLAMACPP_PORT`, or `LLAMACPP_PRESET`;
 any extra command-line arguments are forwarded to `llama-server`.
+
+`./bench.sh` reads `llamacpp-models.ini`, lets you choose a model section with arrow keys + Enter, and
+runs `./llamacpp/llama-bench` against the preset's supported flags (`hf`/`model`, batch sizes, KV cache
+types, GPU/MoE/offload settings, Flash Attention, etc.). Results are written to `logs/bench-...csv`.
+By default it sweeps `--threads` from `-1` through sensible CPU-count-based values (for example
+`-1,2,4,8,10` on a 10-thread machine and `-1,2,4,8,12,16` on a 16-thread machine). Override with
+environment variables such as `THREADS=6,7,8,9,10`, `REPETITIONS=5`, `PROMPT_TOKENS=512`,
+`GEN_TOKENS=128`, `DEPTHS=0`, `MODEL_SECTION=...`, or `OUTPUT=-`.
 
 ## Local TTS servers
 
