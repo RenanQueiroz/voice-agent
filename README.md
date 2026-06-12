@@ -95,7 +95,7 @@ Config lives in three files at the project root:
 | `preferences.toml`      | Active model name per role; auto-written by the Settings modal                  | ❌          |
 | `.env`                  | Secrets (`OPENAI_API_KEY`, `GEMINI_API_KEY`, any `api_key = "${VAR}"` targets)  | ❌          |
 | `mcp_servers.toml`      | MCP server definitions                                                          | ❌          |
-| `llamacpp-models.ini`   | llama-server preset (only when any LLM uses `runtime = "llamacpp"`)             | ❌          |
+| `llamacpp-models.ini`   | llama-server preset for `runtime = "llamacpp"` and `./start-llamacpp.sh`        | ❌          |
 
 Environment variables override `.env`, which overrides `config.toml`.
 
@@ -443,6 +443,7 @@ voice-agent/
 | Script                    | Purpose                                                             |
 |---------------------------|---------------------------------------------------------------------|
 | `./start.sh`              | Run the voice agent                                                 |
+| `./start-llamacpp.sh`     | Run standalone `llama-server` on port 8080 with `llamacpp-models.ini` presets |
 | `./setup.sh`              | Install all dependencies (core + local)                             |
 | `./setup.sh --update`     | Update all dependencies                                             |
 | `./setup-llamacpp.sh`     | Install/update `llama-server` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
@@ -450,6 +451,11 @@ voice-agent/
 | `./setup-supertonic.sh`    | Install the official Supertonic server into `./supertonic-server/` (macOS/Linux CPU, auto-invoked on first switch) |
 | `./setup-kokoro-fastapi.sh` | Clone Kokoro-FastAPI into `./kokoro-fastapi/` + venv + `torch+cu129` + Kokoro-82M model download (Linux+CUDA, auto-invoked on first switch) |
 | `./setup-qwen3-tts.sh`    | Clone Qwen3-TTS into `./qwen3-tts/` + venv + `torch+cu128` + prebuilt flash-attn3 kernels (Linux+CUDA, auto-invoked on first switch) |
+
+`./start-llamacpp.sh` uses the same `./llamacpp/llama-server` binary as the app and starts it with
+`--models-preset ./llamacpp-models.ini`. If the binary is missing, it runs `./setup-llamacpp.sh` first.
+Override the bind address, port, or preset with `LLAMACPP_HOST`, `LLAMACPP_PORT`, or `LLAMACPP_PRESET`;
+any extra command-line arguments are forwarded to `llama-server`.
 
 ## Local TTS servers
 
