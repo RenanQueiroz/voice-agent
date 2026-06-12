@@ -6,9 +6,52 @@
 # Keys correspond to llama-server CLI args (without leading dashes).
 # See: https://github.com/ggml-org/llama.cpp/tree/master/tools/server
 
-[*]
-# ctx-size = 8192
+; [*]
+np = 1
+; ctx-size = 0
+; jinja = true
+; batch-size = 2048
+; ubatch-size = 2048
+; reasoning = auto
+; n-gpu-layers=-1
+; flash-attn = on
+; cache-type-k = q8_0
+; cache-type-v = q8_0
 
-[gemma-4-e4b-it]
-model = path/to/gemma-4-e4b-it.gguf
-# n-gpu-layers = 99
+[unsloth/gemma-4-E4B-it-qat-GGUF]
+load-on-startup = true
+alias = gemma-4-e4b-it-qat
+hf = unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL
+spec-type = draft-mtp
+spec-draft-n-max = 2
+temp = 1.0
+top-p = 0.95
+top-k = 64
+reasoning = off
+; image-min-tokens = 300
+; image-max-tokens = 512
+; Temp fixes for Gemma 4, shouldn't be needed after LlamaCpp patches
+; no-mmap = true
+ctx-size = 65536
+; cache-ram = 0
+; ctx-checkpoints = 1
+; slot-prompt-similarity = 0.4
+
+[unsloth/gemma-4-26B-A4B-it-qat-GGUF]
+; load-on-startup = true
+alias = gemma-4-26b-a4b-it-qat
+hf = unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+spec-type = draft-mtp
+spec-draft-n-max = 2
+temp = 1.0
+top-p = 0.95
+top-k = 64
+reasoning = off
+; image-min-tokens = 300
+; image-max-tokens = 512
+; Temp fixes for Gemma 4, shouldn't be needed after LlamaCpp patches
+no-mmap = true
+ctx-size = 65536
+cache-ram = 0
+ctx-checkpoints = 4
+; slot-prompt-similarity = 0.4
