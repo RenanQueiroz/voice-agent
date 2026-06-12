@@ -79,7 +79,7 @@ All controls are also clickable buttons in the bottom footer. The Interrupt butt
 | R         | Reset conversation (clear history + cards; fresh workflow)   |
 | S         | Open the Settings modal (per-role model picker)              |
 | Y / N     | Approve / decline a pending shell-tool proposal              |
-| Q, Ctrl+C | Quit                                                         |
+| Q, Ctrl+C | Quit; cancels any active turn and stops local servers        |
 
 Each user and agent card has a `⧉ copy` control in the top-right that copies the message text to your clipboard (via OSC-52).
 

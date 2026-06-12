@@ -131,86 +131,87 @@ class VADRecorder:
         # Pre-roll keeps the last N frames so we don't clip speech onset.
         from collections import deque
 
-        while not quit_event.is_set():
-            # Record one complete speech segment
-            speech_buffer: list[np.ndarray] = []
-            pending_frames: list[np.ndarray] = []
-            pre_roll: deque[np.ndarray] = deque(maxlen=self._pre_roll_size)
-            speech_samples = 0
-            speech_frame_count = 0
-            silence_count = 0
-            is_speaking = False
-            self._reset_vad_state()
-
+        try:
             while not quit_event.is_set():
-                if self._muted:
-                    self._close_stream()
-                    await asyncio.sleep(0.05)
-                    continue
+                # Record one complete speech segment
+                speech_buffer: list[np.ndarray] = []
+                pending_frames: list[np.ndarray] = []
+                pre_roll: deque[np.ndarray] = deque(maxlen=self._pre_roll_size)
+                speech_samples = 0
+                speech_frame_count = 0
+                silence_count = 0
+                is_speaking = False
+                self._reset_vad_state()
 
-                stream = self._open_stream()
+                while not quit_event.is_set():
+                    if self._muted:
+                        self._close_stream()
+                        await asyncio.sleep(0.05)
+                        continue
 
-                if stream.read_available < frame_samples:
-                    await asyncio.sleep(0.005)
-                    continue
+                    stream = self._open_stream()
 
-                frame_24k, _ = stream.read(frame_samples)
-                frame_24k = frame_24k.flatten().astype(np.int16)
+                    if stream.read_available < frame_samples:
+                        await asyncio.sleep(0.005)
+                        continue
 
-                frame_16k = _downsample_24k_to_16k(frame_24k)[:frame_16k_samples]
+                    frame_24k, _ = stream.read(frame_samples)
+                    frame_24k = frame_24k.flatten().astype(np.int16)
 
-                speech_prob = self._silero_predict(frame_16k)
-                is_speech = speech_prob > self._vad_threshold
+                    frame_16k = _downsample_24k_to_16k(frame_24k)[:frame_16k_samples]
 
-                if not is_speaking:
-                    if is_speech:
-                        pending_frames.append(frame_24k)
-                        speech_frame_count += 1
-                        if speech_frame_count >= speech_start_threshold:
-                            # Confirmed speech -- prepend pre-roll + pending
-                            is_speaking = True
-                            speech_buffer.extend(pre_roll)
-                            speech_buffer.extend(pending_frames)
-                            speech_samples = sum(len(f) for f in speech_buffer)
+                    speech_prob = self._silero_predict(frame_16k)
+                    is_speech = speech_prob > self._vad_threshold
+
+                    if not is_speaking:
+                        if is_speech:
+                            pending_frames.append(frame_24k)
+                            speech_frame_count += 1
+                            if speech_frame_count >= speech_start_threshold:
+                                # Confirmed speech -- prepend pre-roll + pending
+                                is_speaking = True
+                                speech_buffer.extend(pre_roll)
+                                speech_buffer.extend(pending_frames)
+                                speech_samples = sum(len(f) for f in speech_buffer)
+                                pending_frames.clear()
+                                self._display.vad_speaking(int(speech_prob * 100))
+                        else:
+                            # Reset -- noise was transient
+                            speech_frame_count = 0
                             pending_frames.clear()
+                            pre_roll.append(frame_24k)
+                    else:
+                        # Already speaking
+                        remaining_ms = (
+                            self.silence_threshold - silence_count
+                        ) * frame_duration_ms
+                        if is_speech:
+                            speech_buffer.append(frame_24k)
+                            speech_samples += len(frame_24k)
+                            silence_count = 0
                             self._display.vad_speaking(int(speech_prob * 100))
-                    else:
-                        # Reset -- noise was transient
-                        speech_frame_count = 0
-                        pending_frames.clear()
-                        pre_roll.append(frame_24k)
-                else:
-                    # Already speaking
-                    remaining_ms = (
-                        self.silence_threshold - silence_count
-                    ) * frame_duration_ms
-                    if is_speech:
-                        speech_buffer.append(frame_24k)
-                        speech_samples += len(frame_24k)
-                        silence_count = 0
-                        self._display.vad_speaking(int(speech_prob * 100))
-                    else:
-                        speech_buffer.append(frame_24k)
-                        speech_samples += len(frame_24k)
-                        silence_count += 1
-                        self._display.vad_silence(remaining_ms)
-                        if silence_count >= self.silence_threshold:
+                        else:
+                            speech_buffer.append(frame_24k)
+                            speech_samples += len(frame_24k)
+                            silence_count += 1
+                            self._display.vad_silence(remaining_ms)
+                            if silence_count >= self.silence_threshold:
+                                self._display.vad_clear()
+                                break
+                        if (
+                            self._max_segment_samples is not None
+                            and speech_samples >= self._max_segment_samples
+                        ):
                             self._display.vad_clear()
                             break
-                    if (
-                        self._max_segment_samples is not None
-                        and speech_samples >= self._max_segment_samples
-                    ):
-                        self._display.vad_clear()
-                        break
 
-            # Push completed segment to queue
-            if speech_buffer:
-                segment = np.concatenate(speech_buffer)
-                if len(segment) >= self._min_segment_samples:
-                    await self.segments.put(segment)
-
-        self._close_stream()
+                # Push completed segment to queue
+                if speech_buffer:
+                    segment = np.concatenate(speech_buffer)
+                    if len(segment) >= self._min_segment_samples:
+                        await self.segments.put(segment)
+        finally:
+            self._close_stream()
 
 
 class AudioPlayer:
@@ -321,6 +322,7 @@ class AudioPlayer:
                     elif event.type == "voice_stream_event_error":
                         display.api_error(str(event.error))
             except asyncio.CancelledError:
+                self.stop()
                 raise
             except Exception as e:
                 # `result.stream()` yields events for the whole pipeline

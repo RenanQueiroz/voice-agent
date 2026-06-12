@@ -148,9 +148,9 @@ class ServerManager:
                 )
         return logs
 
-    def stop(self) -> None:
+    def stop(self, grace_timeout: float = 5.0) -> None:
         for role in list(self._procs):
-            self._stop_role(role)
+            self._stop_role(role, grace_timeout=grace_timeout)
 
     # ── Role starters ─────────────────────────────────────
 
@@ -440,7 +440,7 @@ class ServerManager:
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)
                         last_elapsed = t
-                except (httpx.ConnectError, httpx.ConnectTimeout):
+                except httpx.ConnectError, httpx.ConnectTimeout:
                     # ConnectError: TCP refused (not listening yet).
                     # ConnectTimeout: SYN got no answer while the process is
                     # running but has not bound the port yet. Both mean "not
@@ -546,7 +546,7 @@ class ServerManager:
                 except ProcessLookupError, PermissionError:
                     pass
 
-    def _stop_role(self, role: Role) -> None:
+    def _stop_role(self, role: Role, grace_timeout: float = 5.0) -> None:
         proc = self._procs.pop(role, None)
         self._log_files.pop(role, None)
         self._started_for.pop(role, None)
@@ -565,7 +565,7 @@ class ServerManager:
                 # already gone or we can't signal it.
                 proc.send_signal(signal.SIGTERM)
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=grace_timeout)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)

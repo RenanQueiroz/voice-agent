@@ -136,25 +136,45 @@ async def _run_vad(
                 )
 
                 interrupt_task = asyncio.create_task(app.interrupt_event.wait())
-                done, _ = await asyncio.wait(
-                    [current_task, interrupt_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                quit_task = asyncio.create_task(app.quit_event.wait())
+                quit_requested = False
+                try:
+                    done, _ = await asyncio.wait(
+                        [current_task, interrupt_task, quit_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
 
-                if interrupt_task in done:
-                    player.stop()
-                    current_task.cancel()
-                    try:
-                        await current_task
-                    except asyncio.CancelledError:
-                        pass
-                    if app.workflow is not None:
-                        app.workflow.save_partial_history()
-                    app.interrupted()
-                else:
-                    interrupt_task.cancel()
+                    if quit_task in done:
+                        quit_requested = True
+                        player.stop()
+                        current_task.cancel()
+                        try:
+                            await current_task
+                        except asyncio.CancelledError:
+                            pass
+                    elif interrupt_task in done:
+                        player.stop()
+                        current_task.cancel()
+                        try:
+                            await current_task
+                        except asyncio.CancelledError:
+                            pass
+                        if app.workflow is not None:
+                            app.workflow.save_partial_history()
+                        app.interrupted()
+                finally:
+                    for task in (interrupt_task, quit_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        interrupt_task,
+                        quit_task,
+                        return_exceptions=True,
+                    )
 
                 app.responding = False
+                if quit_requested:
+                    break
                 if not app.is_muted:
                     recorder.unmute()
                     app.listening()
@@ -164,6 +184,7 @@ async def _run_vad(
                 app._switch_lock.release()
     finally:
         if current_task and not current_task.done():
+            player.stop()
             current_task.cancel()
             try:
                 await current_task

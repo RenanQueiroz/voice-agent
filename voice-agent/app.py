@@ -198,11 +198,13 @@ class VoiceAgentApp(App[None]):
         finally:
             for server in self.mcp_servers:
                 try:
-                    await server.cleanup()
+                    await asyncio.wait_for(server.cleanup(), timeout=2.0)
+                except TimeoutError:
+                    pass
                 except Exception:
                     pass
             if self.server_manager is not None:
-                self.server_manager.stop()
+                await asyncio.to_thread(self.server_manager.stop, 1.0)
             self.exit()
 
     # ── Actions (keyboard + click both route here) ────────
@@ -222,6 +224,7 @@ class VoiceAgentApp(App[None]):
     async def action_quit(self) -> None:  # type: ignore[override]
         """Request a clean shutdown: the pipeline worker exits and calls self.exit()."""
         self.quit_event.set()
+        self.interrupt_event.set()
         # Fallback — if the worker is wedged, hard-exit after a moment
         self.set_timer(2.0, self.exit)
 
