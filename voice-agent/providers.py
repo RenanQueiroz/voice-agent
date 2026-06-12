@@ -642,10 +642,21 @@ def create_agent(
             base_url=f"{settings.llm_url}/v1",
             api_key="not-needed",
         )
-        model = OpenAIChatCompletionsModel(
-            model=llm.model,
-            openai_client=client,
-        )
+        if llm.runtime == "llamacpp" and llm.audio_input:
+            # llama-server's /v1/responses endpoint currently streams text
+            # correctly but rejects `input_audio` content. Keep the chat
+            # adapter only for this native-audio path so `audio_input=true`
+            # stays a real STT bypass instead of silently falling back to
+            # Whisper text.
+            model = OpenAIChatCompletionsModel(
+                model=llm.model,
+                openai_client=client,
+            )
+        else:
+            model = OpenAIResponsesModel(
+                model=llm.model,
+                openai_client=client,
+            )
     elif llm.vendor == "gemini":
         gemini_key = llm.api_key or settings.gemini_api_key or "missing"
         # Gemini exposes an OpenAI-compatible endpoint for chat completions,

@@ -8,7 +8,7 @@ enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 #
 # Each URL is served by whichever runtime is active for that role:
 #   stt_url — whispercpp (whisper-server)            [darwin, linux]
-#   llm_url — llamacpp, mlx-lm, mlx-vlm              [llamacpp: darwin+linux; mlx-*: darwin-only]
+#   llm_url — llamacpp, mlx-vlm                      [llamacpp: darwin+linux; mlx-vlm: darwin-only]
 #   tts_url — mlx-audio, kokoro-fastapi, qwen3-tts, supertonic
 #             [mlx-audio: darwin-only; supertonic: darwin+linux;
 #              kokoro-fastapi + qwen3-tts: linux+CUDA]

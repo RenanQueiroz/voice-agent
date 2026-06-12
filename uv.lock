@@ -2216,7 +2216,6 @@ dependencies = [
 [package.optional-dependencies]
 local = [
     { name = "mlx-audio", extra = ["server", "stt", "tts"], marker = "sys_platform == 'darwin'" },
-    { name = "mlx-lm", marker = "sys_platform == 'darwin'" },
     { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
 ]
 
@@ -2230,7 +2229,6 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mlx-audio", extras = ["server", "tts", "stt"], marker = "sys_platform == 'darwin' and extra == 'local'" },
-    { name = "mlx-lm", marker = "sys_platform == 'darwin' and extra == 'local'" },
     { name = "mlx-vlm", marker = "sys_platform == 'darwin' and extra == 'local'" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "onnxruntime", specifier = ">=1.16.1" },

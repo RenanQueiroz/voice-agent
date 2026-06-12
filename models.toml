@@ -9,7 +9,6 @@
 # Local entries must declare a `runtime`. Registered runtimes per role:
 #   STT — whispercpp      (linux + macOS)
 #   LLM — llamacpp        (linux + macOS),
-#         mlx-lm          (macOS only),
 #         mlx-vlm         (macOS only)
 #   TTS — mlx-audio       (macOS only),
 #         supertonic      (linux + macOS),
@@ -46,7 +45,7 @@ provider = "cloud"
 model    = "gpt-4o-transcribe"
 
 # ── LLM catalog ───────────────────────────────────────────
-# Local entries must set `runtime` (llamacpp / mlx-lm / mlx-vlm). `audio_input`
+# Local entries must set `runtime` (llamacpp / mlx-vlm). `audio_input`
 # lets the LLM accept audio directly, skipping STT latency; only meaningful
 # when BOTH the STT and LLM are local (they share the same whisper audio
 # buffer — see providers.py).

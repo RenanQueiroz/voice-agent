@@ -173,7 +173,7 @@ class ModelConfig:
     split: str | None = None
 
     # Local-only: which runtime serves this model. One of the IDs registered
-    # in `runtimes.RUNTIMES` (whispercpp for STT; llamacpp / mlx-lm / mlx-vlm
+    # in `runtimes.RUNTIMES` (whispercpp for STT; llamacpp / mlx-vlm
     # for LLM; mlx-audio for TTS). Catalog parsing filters out entries whose
     # runtime isn't supported on the current OS — mlx-* runtimes silently
     # drop off on Linux because there are no Linux wheels for the mlx stack.

@@ -1,7 +1,7 @@
 """Registry of the local runtimes the app can drive.
 
 Each role (STT / LLM / TTS) has a set of possible runtimes — whisper.cpp
-for STT, llama.cpp / mlx-lm / mlx-vlm for LLM, mlx-audio / kokoro-fastapi
+for STT, llama.cpp / mlx-vlm for LLM, mlx-audio / kokoro-fastapi
 / qwen3-tts / supertonic for TTS. Users pick one per active local model via the
 `runtime` field in models.toml.
 
@@ -79,14 +79,6 @@ RUNTIMES: dict[str, Runtime] = {
         pip_module=None,
         pip_package=None,
         health_path="/health",
-    ),
-    "mlx-lm": Runtime(
-        id="mlx-lm",
-        role="llm",
-        supported_os=frozenset({"darwin"}),
-        pip_module="mlx_lm",
-        pip_package="mlx-lm",
-        health_path="/v1/models",
     ),
     "mlx-vlm": Runtime(
         id="mlx-vlm",

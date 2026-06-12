@@ -319,22 +319,21 @@ class ServerManager:
                 cmd.extend(["--models-preset", str(_PROJECT_ROOT / model.preset)])
             return self._launch("llm", cmd, f"llama-server (port {port})")
 
-        # mlx-vlm / mlx-lm
-        module = "mlx_vlm.server" if runtime == "mlx-vlm" else "mlx_lm.server"
+        if runtime != "mlx-vlm":
+            raise ValueError(f"Unsupported local LLM runtime: {runtime}")
         cmd = [
             sys.executable,
             "-m",
-            module,
+            "mlx_vlm.server",
             "--model",
             model.model,
             "--port",
             str(port),
         ]
-        if runtime == "mlx-vlm":
-            if model.kv_bits:
-                cmd.extend(["--kv-bits", model.kv_bits])
-            if model.kv_quant_scheme:
-                cmd.extend(["--kv-quant-scheme", model.kv_quant_scheme])
+        if model.kv_bits:
+            cmd.extend(["--kv-bits", model.kv_bits])
+        if model.kv_quant_scheme:
+            cmd.extend(["--kv-quant-scheme", model.kv_quant_scheme])
         return self._launch("llm", cmd, f"{runtime} (port {port})")
 
     # ── Process plumbing ──────────────────────────────────
