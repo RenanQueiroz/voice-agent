@@ -58,6 +58,21 @@ preset      = "llamacpp-models.ini"
 audio_input = true
 
 [[llm]]
+name        = "gemma-4-12b-it-qat (llamacpp)"
+provider    = "local"
+runtime     = "llamacpp"
+model       = "gemma-4-12b-it-qat"     # must match a section alias in the preset
+preset      = "llamacpp-models.ini"
+audio_input = true
+
+[[llm]]
+name        = "gemma-4-26b-a4b-it-qat (llamacpp)"
+provider    = "local"
+runtime     = "llamacpp"
+model       = "gemma-4-26b-a4b-it-qat"     # must match a section alias in the preset
+preset      = "llamacpp-models.ini"
+
+[[llm]]
 name     = "gpt-5.4-mini"
 provider = "cloud"
 model    = "gpt-5.4-mini"
