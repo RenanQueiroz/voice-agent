@@ -35,6 +35,7 @@ from agents.voice.model import (
     STTModel,
     STTModelSettings,
     StreamedTranscriptionSession,
+    TTSModel,
     TTSModelSettings,
 )
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
@@ -191,6 +192,69 @@ class QwenStreamingTTSModel(StreamingTTSModel):
                 yield chunk
 
 
+def _decode_pcm16_wav(wav_bytes: bytes) -> tuple[bytes, int]:
+    """Decode mono/stereo PCM_16 WAV bytes to mono int16 PCM bytes + rate."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        sample_rate = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+
+    if sample_width != 2:
+        raise ValueError(
+            f"Supertonic returned {sample_width * 8}-bit WAV; expected 16-bit PCM"
+        )
+    if channels == 1:
+        return frames, sample_rate
+    if channels < 1:
+        raise ValueError("Supertonic returned WAV with no audio channels")
+
+    samples = np.frombuffer(frames, dtype="<i2")
+    mono = samples.reshape(-1, channels)[:, 0].astype(np.int16, copy=False)
+    return mono.tobytes(), sample_rate
+
+
+class SupertonicTTSModel(TTSModel):
+    """Adapter for the official `supertonic serve` native `/v1/tts` endpoint.
+
+    The server returns encoded 44.1 kHz PCM_16 WAV. We decode the container but
+    intentionally keep the native sample rate; `AudioPlayer` derives that rate
+    from the active runtime instead of the SDK audio event.
+    """
+
+    _SAMPLE_RATE = 44100
+    _PCM_CHUNK_BYTES = 8192
+
+    def __init__(self, model: str, server_url: str):
+        self._model = model
+        self._server_url = server_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=5.0))
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    async def run(self, text: str, settings: TTSModelSettings) -> AsyncIterator[bytes]:
+        text = _clean_for_tts(text).replace("\u2019", "'")
+        resp = await self._client.post(
+            f"{self._server_url}/v1/tts",
+            json={
+                "text": text,
+                "voice": settings.voice or "F4",
+                "response_format": "wav",
+            },
+        )
+        resp.raise_for_status()
+        pcm, sample_rate = _decode_pcm16_wav(resp.content)
+        if sample_rate != self._SAMPLE_RATE:
+            raise ValueError(
+                f"Supertonic returned {sample_rate} Hz WAV; expected "
+                f"{self._SAMPLE_RATE} Hz"
+            )
+        for offset in range(0, len(pcm), self._PCM_CHUNK_BYTES):
+            yield pcm[offset : offset + self._PCM_CHUNK_BYTES]
+
+
 def _resample_wav_16k(audio_input: AudioInput) -> bytes:
     """Convert AudioInput (24kHz int16) to a 16kHz WAV byte buffer."""
     buf = audio_input.buffer
@@ -214,7 +278,7 @@ def _resample_wav_16k(audio_input: AudioInput) -> bytes:
 
 
 class WhisperCppSTTModel(STTModel):
-    """STT model that calls whisper.cpp server's /inference endpoint with VAD."""
+    """STT model that calls whisper.cpp server's /inference endpoint."""
 
     def __init__(self, model_name: str, server_url: str):
         self._model_name = model_name
@@ -235,8 +299,9 @@ class WhisperCppSTTModel(STTModel):
         wav_bytes = _resample_wav_16k(input)
         fields: dict[str, str] = {
             "temperature": "0.0",
-            "temperature_inc": "0.2",
-            "response_format": "json",
+            "temperature_inc": "0.0",
+            "no_timestamps": "true",
+            "response_format": "text",
         }
         if settings.language:
             fields["language"] = settings.language
@@ -246,7 +311,7 @@ class WhisperCppSTTModel(STTModel):
             data=fields,
         )
         resp.raise_for_status()
-        return resp.json().get("text", "").strip()
+        return resp.text.strip()
 
     async def create_session(
         self,
@@ -783,6 +848,11 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
         "voice": tts.voice if tts.voice else None,
         "text_splitter": _select_splitter(tts.split),
     }
+    if tts.provider == "local" and tts.runtime == "supertonic":
+        # Supertonic is one-shot per text chunk, but we decode the returned WAV
+        # into PCM chunks. Emit each chunk through the SDK immediately instead
+        # of buffering a whole response-sized list of chunks first.
+        tts_settings_kwargs["buffer_size"] = 1
     if tts.instruct and tts.provider == "cloud":
         tts_settings_kwargs["instructions"] = tts.instruct
 
@@ -811,31 +881,36 @@ def create_pipeline(
     tts = settings.tts
     tts_model: object = tts.model
     if tts.provider == "local":
-        tts_client = AsyncOpenAI(
-            base_url=f"{settings.tts_url}/v1",
-            api_key="not-needed",
-        )
-        # Qwen3-TTS streams float32 PCM and rejects the mlx-audio extras
-        # (streaming_interval / ref_audio / ref_text). Use a dedicated
-        # subclass that converts float32 → int16 and sends only the fields
-        # this backend accepts.
-        if tts.runtime == "qwen3-tts":
-            tts_model = QwenStreamingTTSModel(
+        if tts.runtime == "supertonic":
+            tts_model = SupertonicTTSModel(
                 model=tts.model,
-                openai_client=tts_client,
-                instruct=tts.instruct,
-                temperature=tts.temperature,
+                server_url=settings.tts_url or "http://localhost:8000",
             )
         else:
-            tts_model = StreamingTTSModel(
-                model=tts.model,
-                openai_client=tts_client,
-                ref_audio=tts.ref_audio,
-                ref_text=tts.ref_text,
-                streaming_interval=tts.streaming_interval,
-                instruct=tts.instruct,
-                temperature=tts.temperature,
+            tts_client = AsyncOpenAI(
+                base_url=f"{settings.tts_url}/v1",
+                api_key="not-needed",
             )
+            # Qwen3-TTS rejects the mlx-audio extras
+            # (streaming_interval / ref_audio / ref_text). Use a dedicated
+            # subclass that sends only the fields this backend accepts.
+            if tts.runtime == "qwen3-tts":
+                tts_model = QwenStreamingTTSModel(
+                    model=tts.model,
+                    openai_client=tts_client,
+                    instruct=tts.instruct,
+                    temperature=tts.temperature,
+                )
+            else:
+                tts_model = StreamingTTSModel(
+                    model=tts.model,
+                    openai_client=tts_client,
+                    ref_audio=tts.ref_audio,
+                    ref_text=tts.ref_text,
+                    streaming_interval=tts.streaming_interval,
+                    instruct=tts.instruct,
+                    temperature=tts.temperature,
+                )
     elif tts.vendor == "gemini":
         from .gemini_tts import GeminiTTSModel
 

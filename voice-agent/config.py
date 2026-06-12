@@ -246,6 +246,9 @@ class Settings:
     # VAD
     vad_threshold: float = 0.5
     vad_silence_ms: int = 500
+    vad_pre_speech_ms: int = 256
+    vad_min_speech_ms: int = 500
+    vad_max_duration_s: float | None = 30.0
 
     # Features
     enable_mcp: bool = False
@@ -310,6 +313,17 @@ class Settings:
     @property
     def tts_voice(self) -> str | None:
         return self.tts.voice
+
+    @property
+    def tts_output_sample_rate(self) -> int:
+        """Sample rate produced by the active TTS path.
+
+        The OpenAI Agents SDK emits PCM audio events without sample-rate
+        metadata, so playback derives the rate from our active runtime.
+        """
+        if self.tts.provider == "local" and self.tts.runtime == "supertonic":
+            return 44100
+        return 24000
 
     def active_names(self) -> dict[str, str]:
         return {"stt": self.active_stt, "llm": self.active_llm, "tts": self.active_tts}
@@ -729,6 +743,22 @@ def load_settings() -> Settings:
         "tts", prefs.get("tts"), tts_models, tts_dropped, fallback_notes
     )
 
+    vad_pre_speech_ms = int(
+        _get_optional("VAD_PRE_SPEECH_MS", vad.get("pre_speech_ms")) or 256
+    )
+    vad_min_speech_ms = int(
+        _get_optional("VAD_MIN_SPEECH_MS", vad.get("min_speech_ms")) or 500
+    )
+    vad_max_raw = _get_optional("VAD_MAX_DURATION_S", vad.get("max_duration_s"))
+    vad_max_duration_s = float(vad_max_raw) if vad_max_raw not in (None, "") else None
+
+    if vad_pre_speech_ms < 0:
+        raise ConfigError("[vad].pre_speech_ms must be >= 0")
+    if vad_min_speech_ms < 0:
+        raise ConfigError("[vad].min_speech_ms must be >= 0")
+    if vad_max_duration_s is not None and vad_max_duration_s <= 0:
+        raise ConfigError("[vad].max_duration_s must be > 0, or omit it to disable")
+
     settings = Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
@@ -743,6 +773,9 @@ def load_settings() -> Settings:
         active_tts=active_tts,
         vad_threshold=float(_get("VAD_THRESHOLD", vad.get("threshold"))),
         vad_silence_ms=int(_get("VAD_SILENCE_MS", vad.get("silence_ms"))),
+        vad_pre_speech_ms=vad_pre_speech_ms,
+        vad_min_speech_ms=vad_min_speech_ms,
+        vad_max_duration_s=vad_max_duration_s,
         enable_mcp=_get("ENABLE_MCP", general.get("enable_mcp")).lower() == "true",
         show_transcript=_get("SHOW_TRANSCRIPT", display.get("show_transcript")).lower()
         == "true",

@@ -9,7 +9,9 @@ enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 # Each URL is served by whichever runtime is active for that role:
 #   stt_url — whispercpp (whisper-server)            [darwin, linux]
 #   llm_url — llamacpp, mlx-lm, mlx-vlm              [llamacpp: darwin+linux; mlx-*: darwin-only]
-#   tts_url — mlx-audio, kokoro-fastapi, qwen3-tts   [mlx-audio: darwin-only; kokoro-fastapi + qwen3-tts: linux+CUDA]
+#   tts_url — mlx-audio, kokoro-fastapi, qwen3-tts, supertonic
+#             [mlx-audio: darwin-only; supertonic: darwin+linux;
+#              kokoro-fastapi + qwen3-tts: linux+CUDA]
 # Runtimes that don't support the current OS are filtered out of the
 # model catalog at startup, so only the URLs you need are ever consulted.
 [local]
@@ -28,6 +30,14 @@ llm_url = "http://localhost:8080"
 threshold  = 0.5
 # Milliseconds of silence after speech before triggering processing.
 silence_ms = 1000
+# Milliseconds of audio to keep before confirmed speech so speech onsets do
+# not get clipped while Silero is waiting for enough positive frames.
+pre_speech_ms = 256
+# Drop detected segments shorter than this duration.
+min_speech_ms = 500
+# Force-finalize very long utterances even without enough trailing silence.
+# Omit or set via env to empty to disable.
+max_duration_s = 30
 
 # ── Display ───────────────────────────────────────────────
 [display]
@@ -173,4 +183,29 @@ Good examples — notice these use tags liberally:
 Bad examples (avoid):
   "Here's a joke [adding a laugh tag]: ..."                   — announcing the tag
   "The [markdown] section looks odd."                          — using square brackets for anything other than an audio tag
+"""
+
+# Supertonic 3 has experimental expression tags that use angle brackets.
+# The full tag behavior is not stable yet; this policy follows community
+# testing acknowledged by a Supertone org member as useful current-version
+# guidance. Keep tags sparse and only at sentence boundaries.
+supertonic-3 = """
+
+You are speaking through Supertonic 3 TTS. It supports experimental inline expression tags using angle brackets. These tags are unreliable, so use them sparingly and only when the expression clearly fits.
+
+Use only these tested patterns:
+- For laughter, put a triple tag sequence at the end of the sentence: "That was funny. <laugh> <laugh> <laugh>"
+- For a breath, put a triple tag sequence at the beginning: "<breath> <breath> <breath> I finally made it."
+- For surprise, use triple tags at both the beginning and end, and only for genuinely surprising reactions: "<surprise> <surprise> <surprise> You bought this for me? No way! <surprise> <surprise> <surprise>"
+- For a sigh, use double tags at both the beginning and end for mild frustration, fatigue, or resignation: "<sigh> <sigh> Another meeting was added to my calendar. <sigh> <sigh>"
+- For sadness, use triple tags at both the beginning and end for clearly sad responses: "<sad> <sad> <sad> I never thought it would end like this. <sad> <sad> <sad>"
+- For a cough, use a triple tag sequence at the beginning only, and rarely: "<cough> <cough> <cough> This room is dusty."
+
+Avoid these tags by default because current testing found they are spoken literally, ignored, or unreliable: <scream>, <throatclear>, <angry>, and <yawn>.
+
+Hard rules:
+1. Do not use Supertonic tags in the middle of a sentence.
+2. Do not use single Supertonic tags. Useful cases generally use doubled or tripled tags as described above.
+3. Do not announce or explain tags.
+4. Do not use square brackets for Supertonic tags. Supertonic uses angle brackets only.
 """

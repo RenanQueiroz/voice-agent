@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Builds whisper.cpp from source and downloads the specified GGML model
-# plus the Silero VAD model into ./whispercpp/.
+# plus the Silero VAD ONNX model used by the Python recorder.
 #
 # GPU acceleration:
 #   macOS   → Metal (auto-enabled by whisper.cpp's cmake).
@@ -25,8 +25,6 @@ REPO="https://github.com/ggml-org/whisper.cpp.git"
 
 MODEL="${1:-large-v3-turbo}"
 WHISPER_HF="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-VAD_HF="https://huggingface.co/ggml-org/whisper-vad/resolve/main"
-VAD_MODEL="silero-v5.1.2"
 
 SUPPORTED_MODELS=(
     tiny tiny.en base base.en small small.en small.en-tdrz
@@ -35,52 +33,6 @@ SUPPORTED_MODELS=(
 )
 
 OS_NAME="$(uname -s)"
-
-# --- Install ffmpeg if missing ---
-#
-# whisper-server is launched with `--convert`, which shells out to ffmpeg to
-# transcode incoming audio. Without ffmpeg on PATH, the server logs
-# "ffmpeg is not found." and never binds to its port — every health probe
-# times out and the role-start flow fails opaquely.
-
-install_ffmpeg() {
-    case "$OS_NAME" in
-        Darwin)
-            if ! command -v brew &> /dev/null; then
-                echo "Error: ffmpeg is required but neither ffmpeg nor Homebrew are installed." >&2
-                echo "Install ffmpeg manually: https://ffmpeg.org/download.html" >&2
-                exit 1
-            fi
-            echo "ffmpeg not found, installing via Homebrew..."
-            brew install ffmpeg > /dev/null 2>&1
-            ;;
-        Linux)
-            if command -v apt-get &> /dev/null; then
-                echo "ffmpeg not found, installing via apt..."
-                sudo apt-get update -qq
-                sudo apt-get install -y ffmpeg
-            elif command -v dnf &> /dev/null; then
-                echo "ffmpeg not found, installing via dnf..."
-                sudo dnf install -y ffmpeg
-            elif command -v pacman &> /dev/null; then
-                echo "ffmpeg not found, installing via pacman..."
-                sudo pacman -S --noconfirm ffmpeg
-            elif command -v zypper &> /dev/null; then
-                echo "ffmpeg not found, installing via zypper..."
-                sudo zypper install -y ffmpeg
-            else
-                echo "Error: ffmpeg is required but no supported package manager was found." >&2
-                echo "Install ffmpeg manually: https://ffmpeg.org/download.html" >&2
-                exit 1
-            fi
-            ;;
-        *)
-            echo "Error: ffmpeg is required but this script doesn't know how to install it on $OS_NAME." >&2
-            exit 1
-            ;;
-    esac
-    echo "ffmpeg installed."
-}
 
 # --- Install cmake if missing ---
 
@@ -138,12 +90,6 @@ fi
 mkdir -p "$INSTALL_DIR" "$MODELS_DIR"
 
 UPDATED=0
-
-# --- Ensure ffmpeg is installed (required at runtime by whisper-server --convert) ---
-
-if ! command -v ffmpeg &> /dev/null; then
-    install_ffmpeg
-fi
 
 # --- Build whisper.cpp ---
 
@@ -203,20 +149,6 @@ fi
 
 echo
 
-# --- Download VAD model ---
-
-VAD_FILE="$MODELS_DIR/ggml-${VAD_MODEL}.bin"
-if [ -f "$VAD_FILE" ]; then
-    echo "VAD model ggml-${VAD_MODEL}.bin already exists, skipping download."
-else
-    echo "Downloading VAD model ggml-${VAD_MODEL}.bin..."
-    curl -fL --progress-bar -o "$VAD_FILE" "$VAD_HF/ggml-${VAD_MODEL}.bin"
-    echo "VAD model downloaded."
-    UPDATED=1
-fi
-
-echo
-
 # --- Download Silero VAD ONNX model (for Python-side VAD) ---
 
 SILERO_ONNX="$MODELS_DIR/silero_vad.onnx"
@@ -238,6 +170,5 @@ else
     echo "Done. Installed to $INSTALL_DIR"
     echo "  Binary:    $INSTALL_DIR/whisper-server"
     echo "  Model:     $MODEL_FILE"
-    echo "  VAD model: $VAD_FILE"
     echo "  Silero ONNX: $SILERO_ONNX"
 fi

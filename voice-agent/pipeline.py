@@ -47,7 +47,11 @@ async def _process_turn(
 
     try:
         result = await pipeline.run(audio_input)
-        tts_total, tts_first = await player.play(result, app)
+        tts_total, tts_first = await player.play(
+            result,
+            app,
+            sample_rate=settings.tts_output_sample_rate,
+        )
 
         if settings.show_metrics:
             m = workflow.last_metrics

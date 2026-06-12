@@ -174,9 +174,6 @@ class ServerManager:
         port = self._parse_port(self._require_url("stt"))
         whisper_bin = _PROJECT_ROOT / "whispercpp" / "whisper-server"
         model_path = _PROJECT_ROOT / "whispercpp" / "models" / f"ggml-{model.model}.bin"
-        vad_model_path = (
-            _PROJECT_ROOT / "whispercpp" / "models" / "ggml-silero-v5.1.2.bin"
-        )
         cmd = [
             str(whisper_bin),
             "-m",
@@ -185,10 +182,6 @@ class ServerManager:
             "0.0.0.0",
             "--port",
             str(port),
-            "--vad",
-            "--vad-model",
-            str(vad_model_path),
-            "--convert",
         ]
         return self._launch("stt", cmd, f"whisper-server (port {port})")
 
@@ -199,6 +192,8 @@ class ServerManager:
             return self._start_kokoro_fastapi(port)
         if runtime == "qwen3-tts":
             return self._start_qwen3_tts(model, port)
+        if runtime == "supertonic":
+            return self._start_supertonic(model, port)
         cmd = [
             sys.executable,
             "-m",
@@ -286,6 +281,27 @@ class ServerManager:
             env["QWEN3_DEFAULT_MODEL"] = model.model_variant
         cmd = [str(py), "-m", "api.main"]
         return self._launch("tts", cmd, f"qwen3-tts (port {port})", cwd=repo, env=env)
+
+    def _start_supertonic(self, model: ModelConfig, port: int) -> bool:
+        install_dir = _PROJECT_ROOT / "supertonic-server"
+        supertonic = install_dir / ".venv" / "bin" / "supertonic"
+        cmd = [
+            str(supertonic),
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--model",
+            model.model,
+        ]
+        return self._launch(
+            "tts",
+            cmd,
+            f"supertonic (port {port})",
+            cwd=install_dir,
+            env={**os.environ},
+        )
 
     def _start_llm(self, model: ModelConfig) -> bool:
         port = self._parse_port(self._require_url("llm"))
@@ -424,13 +440,12 @@ class ServerManager:
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)
                         last_elapsed = t
-                except httpx.ConnectError, httpx.ConnectTimeout:
+                except (httpx.ConnectError, httpx.ConnectTimeout):
                     # ConnectError: TCP refused (not listening yet).
-                    # ConnectTimeout: SYN got no answer (process running but
-                    # hasn't bound to the port — e.g. whisper-server stuck
-                    # because ffmpeg is missing). Both mean "not ready yet";
-                    # let the outer STARTUP_TIMEOUT bound the wait instead of
-                    # letting the exception kill the worker.
+                    # ConnectTimeout: SYN got no answer while the process is
+                    # running but has not bound the port yet. Both mean "not
+                    # ready yet"; let STARTUP_TIMEOUT bound the wait instead
+                    # of letting the exception kill the worker.
                     t = int(elapsed)
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)
@@ -460,6 +475,7 @@ class ServerManager:
         signatures = [
             str(_PROJECT_ROOT / "kokoro-fastapi" / ".venv" / "bin" / "python"),
             str(_PROJECT_ROOT / "qwen3-tts" / ".venv" / "bin" / "python"),
+            str(_PROJECT_ROOT / "supertonic-server" / ".venv" / "bin" / "supertonic"),
             str(_PROJECT_ROOT / "whispercpp" / "whisper-server"),
             str(_PROJECT_ROOT / "llamacpp" / "llama-server"),
         ]
@@ -716,8 +732,8 @@ class ServerManager:
     def _ensure_tts(self, model: ModelConfig) -> bool:
         if not self._ensure_system_deps(model.model):
             return False
-        # Source-installed Linux TTS runtimes: each has its own repo +
-        # venv driven by a setup script. Skip the pip-install dance.
+        # Isolated TTS server runtimes: each has its own venv driven by a
+        # setup script. Skip the main-app pip-install dance.
         if model.runtime == "kokoro-fastapi":
             return self._ensure_setup_script(
                 "setup-kokoro-fastapi.sh",
@@ -729,6 +745,12 @@ class ServerManager:
                 "setup-qwen3-tts.sh",
                 _PROJECT_ROOT / "qwen3-tts" / ".venv" / "bin" / "python",
                 "qwen3-tts",
+            )
+        if model.runtime == "supertonic":
+            return self._ensure_setup_script(
+                "setup-supertonic.sh",
+                _PROJECT_ROOT / "supertonic-server" / ".venv" / "bin" / "supertonic",
+                "supertonic",
             )
         packages: list[str] = []
         runtime = get_runtime(model.runtime) if model.runtime else None
@@ -764,7 +786,7 @@ class ServerManager:
     ) -> bool:
         """Run a setup-<runtime>.sh script once, guarded by a sentinel path.
 
-        Shared by llamacpp / kokoro-fastapi / qwen3-tts. The script is
+        Shared by llamacpp / supertonic / kokoro-fastapi / qwen3-tts. The script is
         expected to be idempotent — the sentinel check is a fast-path to
         skip running it entirely when the install is already present.
         Script output streams to the splash via `server_install_failed`

@@ -2,7 +2,7 @@
 
 Each role (STT / LLM / TTS) has a set of possible runtimes — whisper.cpp
 for STT, llama.cpp / mlx-lm / mlx-vlm for LLM, mlx-audio / kokoro-fastapi
-/ qwen3-tts for TTS. Users pick one per active local model via the
+/ qwen3-tts / supertonic for TTS. Users pick one per active local model via the
 `runtime` field in models.toml.
 
 This module is the single source of truth for:
@@ -12,10 +12,10 @@ This module is the single source of truth for:
   config.py when a user's saved preference is filtered out),
 - the Python module to import to check if a runtime is installed
   (`pip_module`, None for binary runtimes like llamacpp/whispercpp and
-  for source-installed runtimes like kokoro-fastapi / qwen3-tts),
+  for isolated server runtimes like supertonic / kokoro-fastapi / qwen3-tts),
 - the health-check endpoint to poll once the server is launched, plus
-  an optional response-body check for servers that return 200 during
-  warmup (Qwen3-TTS).
+  an optional response-body check for servers whose 200 response still
+  needs semantic readiness validation (Qwen3-TTS, Supertonic).
 
 Adding another local TTS runtime is a matter of adding an entry here
 and teaching `ServerManager._start_tts` to dispatch on the new
@@ -36,6 +36,17 @@ Role = Literal["stt", "llm", "tts"]
 def _default_ready_check(resp: httpx.Response) -> bool:
     """Most servers are ready as soon as they return any 2xx on the health path."""
     return resp.status_code == 200
+
+
+def _json_status_ready(expected: str) -> Callable[[httpx.Response], bool]:
+    def check(resp: httpx.Response) -> bool:
+        if resp.status_code != 200:
+            return False
+        if not resp.headers.get("content-type", "").startswith("application/json"):
+            return False
+        return resp.json().get("status") == expected
+
+    return check
 
 
 @dataclass(frozen=True)
@@ -93,10 +104,8 @@ RUNTIMES: dict[str, Runtime] = {
         pip_package="mlx-audio[server,tts]",
         health_path="/v1/models",
     ),
-    # Source-installed FastAPI TTS servers (Linux + CUDA). Neither is a
-    # pip module we import in-process — each ships as a checkout with its
-    # own uv venv, driven by a setup-<runtime>.sh script. ServerManager
-    # launches `<repo>/.venv/bin/python -m <entrypoint>`.
+    # Isolated FastAPI TTS servers. They are not imported in-process — each
+    # runs from its own uv venv, driven by a setup-<runtime>.sh script.
     "kokoro-fastapi": Runtime(
         id="kokoro-fastapi",
         role="tts",
@@ -116,15 +125,19 @@ RUNTIMES: dict[str, Runtime] = {
         # with `{"status": "initializing"}` in the body. Only treat the
         # server as ready once the backend reports "healthy" (set to True
         # after the 3-pass warmup finishes in optimized_backend.py).
-        ready_check=lambda r: (
-            r.status_code == 200
-            and (
-                r.json().get("status")
-                if r.headers.get("content-type", "").startswith("application/json")
-                else None
-            )
-            == "healthy"
-        ),
+        ready_check=_json_status_ready("healthy"),
+    ),
+    "supertonic": Runtime(
+        id="supertonic",
+        role="tts",
+        supported_os=frozenset({"darwin", "linux"}),
+        # Official `supertonic serve` runs from its own uv venv. Keep it out
+        # of the main app environment so ONNX Runtime wheel constraints don't
+        # leak into the Python 3.14 project venv.
+        pip_module=None,
+        pip_package=None,
+        health_path="/v1/health",
+        ready_check=_json_status_ready("ok"),
     ),
 }
 

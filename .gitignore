@@ -25,6 +25,9 @@ llamacpp-models.ini
 # Kokoro-fastapi
 kokoro-fastapi/
 
+# Supertonic server venv
+supertonic-server/
+
 # Qwen3 TTS
 qwen3-tts/
 

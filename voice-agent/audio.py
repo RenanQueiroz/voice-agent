@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,7 +43,20 @@ class VADRecorder:
 
         # Silero VAD requires 512 samples at 16kHz (32ms chunks)
         self._frame_duration_ms = 32
-        self.silence_threshold = settings.vad_silence_ms // self._frame_duration_ms
+        self.silence_threshold = max(
+            1, math.ceil(settings.vad_silence_ms / self._frame_duration_ms)
+        )
+        self._pre_roll_size = math.ceil(
+            settings.vad_pre_speech_ms / self._frame_duration_ms
+        )
+        self._min_segment_samples = int(
+            self.sample_rate * (settings.vad_min_speech_ms / 1000)
+        )
+        self._max_segment_samples = (
+            int(self.sample_rate * settings.vad_max_duration_s)
+            if settings.vad_max_duration_s is not None
+            else None
+        )
 
         self._muted = False
         self._display = display
@@ -114,17 +128,15 @@ class VADRecorder:
         # 2 frames at 32ms = 64ms -- Silero VAD is accurate enough for a lower threshold.
         speech_start_threshold = 2
 
-        # Pre-roll: keep last N frames so we don't clip speech onset.
-        # 8 frames × 32ms = 256ms — generous buffer since Silero VAD
-        # may confirm speech slightly after the actual onset.
-        pre_roll_size = 8
+        # Pre-roll keeps the last N frames so we don't clip speech onset.
         from collections import deque
 
         while not quit_event.is_set():
             # Record one complete speech segment
             speech_buffer: list[np.ndarray] = []
             pending_frames: list[np.ndarray] = []
-            pre_roll: deque[np.ndarray] = deque(maxlen=pre_roll_size)
+            pre_roll: deque[np.ndarray] = deque(maxlen=self._pre_roll_size)
+            speech_samples = 0
             speech_frame_count = 0
             silence_count = 0
             is_speaking = False
@@ -159,6 +171,7 @@ class VADRecorder:
                             is_speaking = True
                             speech_buffer.extend(pre_roll)
                             speech_buffer.extend(pending_frames)
+                            speech_samples = sum(len(f) for f in speech_buffer)
                             pending_frames.clear()
                             self._display.vad_speaking(int(speech_prob * 100))
                     else:
@@ -173,20 +186,28 @@ class VADRecorder:
                     ) * frame_duration_ms
                     if is_speech:
                         speech_buffer.append(frame_24k)
+                        speech_samples += len(frame_24k)
                         silence_count = 0
                         self._display.vad_speaking(int(speech_prob * 100))
                     else:
                         speech_buffer.append(frame_24k)
+                        speech_samples += len(frame_24k)
                         silence_count += 1
                         self._display.vad_silence(remaining_ms)
                         if silence_count >= self.silence_threshold:
                             self._display.vad_clear()
                             break
+                    if (
+                        self._max_segment_samples is not None
+                        and speech_samples >= self._max_segment_samples
+                    ):
+                        self._display.vad_clear()
+                        break
 
             # Push completed segment to queue
             if speech_buffer:
                 segment = np.concatenate(speech_buffer)
-                if len(segment) >= self.sample_rate * 0.5:
+                if len(segment) >= self._min_segment_samples:
                     await self.segments.put(segment)
 
         self._close_stream()
@@ -221,7 +242,12 @@ class AudioPlayer:
             except Exception:
                 pass
 
-    async def play(self, result, display: Display) -> tuple[float, float]:
+    async def play(
+        self,
+        result,
+        display: Display,
+        sample_rate: int = 24000,
+    ) -> tuple[float, float]:
         """Stream TTS audio to speakers.
         Returns (tts_total_seconds, tts_first_byte_seconds)."""
         self._stopped = False
@@ -229,7 +255,7 @@ class AudioPlayer:
         #
         #  * `latency="high"` tells PortAudio to request the host's
         #    generous latency tier (vs. ~5-10 ms default on low).
-        #  * `blocksize=4800` (200 ms at 24 kHz) sets the per-write
+        #  * `blocksize` (200 ms at the active TTS sample rate) sets the per-write
         #    chunk the stream expects — larger blocksize means more
         #    samples can sit in flight before the hardware drains,
         #    giving producer jitter (TTS network hiccups, GC pauses,
@@ -243,12 +269,13 @@ class AudioPlayer:
         # underrun every single turn. Instead we start the stream
         # *after* queueing the first chunk below, so consumption and
         # production begin in lockstep.
+        blocksize = max(1, int(sample_rate * 0.2))
         self._player = sd.OutputStream(
-            samplerate=24000,
+            samplerate=sample_rate,
             channels=CHANNELS,
             dtype=np.int16,
             latency="high",
-            blocksize=4800,  # 200 ms at 24 kHz
+            blocksize=blocksize,
         )
         stream_started = False
         stream_start_mono = 0.0
@@ -261,6 +288,8 @@ class AudioPlayer:
                     if self._stopped:
                         break
                     if event.type == "voice_stream_event_audio":
+                        if event.data is None:
+                            continue
                         if first_byte_time == 0.0:
                             first_byte_time = time.monotonic() - tts_start
                         if self._stopped:
@@ -278,7 +307,7 @@ class AudioPlayer:
                         # relying on PortAudio/PulseAudio drain semantics.
                         # event.data is an int16 sample array, so one
                         # element == one sample.
-                        total_audio_seconds += len(event.data) / 24000
+                        total_audio_seconds += len(event.data) / sample_rate
                         await asyncio.get_event_loop().run_in_executor(
                             None, self._player.write, event.data
                         )
@@ -346,12 +375,10 @@ class AudioPlayer:
                 #
                 # Skipped on explicit interrupt (see above branch).
                 elapsed = time.monotonic() - stream_start_mono
-                startup_delay = 4800 / 24000  # blocksize / sample_rate
+                startup_delay = blocksize / sample_rate
                 pulse_cushion = 0.3
                 drain_seconds = (
-                    (total_audio_seconds - elapsed)
-                    + startup_delay
-                    + pulse_cushion
+                    (total_audio_seconds - elapsed) + startup_delay + pulse_cushion
                 )
                 if drain_seconds > 0:
                     await asyncio.sleep(drain_seconds)

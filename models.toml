@@ -12,6 +12,7 @@
 #         mlx-lm          (macOS only),
 #         mlx-vlm         (macOS only)
 #   TTS — mlx-audio       (macOS only),
+#         supertonic      (linux + macOS),
 #         kokoro-fastapi  (linux only — CUDA),
 #         qwen3-tts       (linux only — CUDA)
 # Entries whose runtime isn't supported on the current OS are filtered out
@@ -50,34 +51,12 @@ model    = "gpt-4o-transcribe"
 # when BOTH the STT and LLM are local (they share the same whisper audio
 # buffer — see providers.py).
 [[llm]]
-name        = "qwen3.6-35b-a3b (llamacpp)"
+name        = "gemma-4-e4b-it-qat (llamacpp)"
 provider    = "local"
 runtime     = "llamacpp"
-model       = "qwen3.6-35b-a3b"     # must match a section alias in the preset
-preset      = "llamacpp-models.ini"
-
-[[llm]]
-name        = "gemma-4-e4b-it (llamacpp)"
-provider    = "local"
-runtime     = "llamacpp"
-model       = "gemma-4-e4b-it"     # must match a section alias in the preset
+model       = "gemma-4-e4b-it-qat"     # must match a section alias in the preset
 preset      = "llamacpp-models.ini"
 audio_input = true
-
-[[llm]]
-name            = "gemma-4-e4b-it (mlx-vlm)"
-provider        = "local"
-runtime         = "mlx-vlm"
-model           = "unsloth/gemma-4-E4B-it-UD-MLX-4bit"
-audio_input     = true
-kv_bits         = 3.5
-kv_quant_scheme = "turboquant"
-
-[[llm]]
-name     = "gemma-3-4b-it (mlx-lm)"
-provider = "local"
-runtime  = "mlx-lm"
-model    = "mlx-community/gemma-3-4b-it-4bit"
 
 [[llm]]
 name     = "gpt-5.4-mini"
@@ -149,6 +128,19 @@ provider = "local"
 runtime  = "mlx-audio"
 model    = "mlx-community/Kokoro-82M-bf16"
 voice    = "af_heart"
+
+# macOS + Linux CPU. Official supertone-inc/supertonic-py local server,
+# installed into ./supertonic-server/ by setup-supertonic.sh on first switch.
+# The server exposes an OpenAI-compatible alias, but the app uses native
+# /v1/tts so it can preserve Supertonic's 44.1 kHz WAV output. Built-in
+# voices are M1-M5 and F1-F5; default to F4 for the voice-agent catalog.
+[[tts]]
+name     = "supertonic"
+provider = "local"
+runtime  = "supertonic"
+model    = "supertonic-3"
+voice    = "F2"
+# voice    = "F4"
 
 # Linux + CUDA. Clone of remsky/Kokoro-FastAPI, installed into
 # ./kokoro-fastapi/ by setup-kokoro-fastapi.sh on first switch. OpenAI-compat
