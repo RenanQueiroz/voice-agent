@@ -178,6 +178,8 @@ class ServerManager:
             str(whisper_bin),
             "-m",
             str(model_path),
+            "-t",
+            str(self.settings.whisper_threads),
             "--host",
             "0.0.0.0",
             "--port",

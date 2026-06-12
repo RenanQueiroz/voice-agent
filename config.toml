@@ -18,6 +18,7 @@ enable_mcp = true                  # load MCP tool servers from mcp_servers.toml
 stt_url = "http://localhost:9000"
 tts_url = "http://localhost:8000"
 llm_url = "http://localhost:8080"
+# whisper_threads = 16  # optional; defaults to half the detected CPU thread count
 
 # ── Model catalogs ────────────────────────────────────────
 # The per-role model lists ([[stt]] / [[llm]] / [[tts]]) live in `models.toml`.

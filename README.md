@@ -21,7 +21,7 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
-- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
+- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux+NVIDIA, OpenBLAS CPU fallback when available), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
 - **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-vlm` / `mlx-audio` / `supertonic` / `kokoro-fastapi` / `qwen3-tts`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
 - **Per-turn metrics**: STT, LLM (with TTFT), TTS (with first-audio latency), and total timing inline with each turn. Audio-input local LLM turns also show `Audio->LLM` and background Whisper timing so it is clear whether STT stayed off the response path.
 
@@ -40,7 +40,7 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 
   macOS ships PortAudio bundled in the `sounddevice` wheel, so none of the above apply.
 - **espeak-ng** (Kokoro TTS only; auto-installed at first use via brew/apt/dnf/pacman/zypper depending on your system).
-- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with `-DGGML_CUDA=ON`. `setup-llamacpp.sh` also builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt. CUDA TTS on Linux (`kokoro-fastapi`, `qwen3-tts`) also needs NVIDIA — `kokoro-fastapi` pulls `torch+cu129` (driver ≥550), and `qwen3-tts` uses its own CUDA torch stack (see [Local TTS servers](#local-tts-servers) below). Supertonic is CPU-only by default and does not require NVIDIA.
+- **NVIDIA GPU + driver** (optional, Linux only) — when `nvidia-smi` is present, `setup-whispercpp.sh` compiles whisper.cpp with CUDA (`-DGGML_CUDA=ON`); if NVIDIA is not available it falls back to OpenBLAS CPU acceleration when available (`-DGGML_BLAS=1`), then plain CPU. `setup-llamacpp.sh` builds llama.cpp from source with `-DGGML_CUDA=ON` against the host GPU (CMAKE_CUDA_ARCHITECTURES=native); this requires the **CUDA Toolkit** (nvcc) to be installed. Without nvcc, the script falls back to the CPU prebuilt. CUDA TTS on Linux (`kokoro-fastapi`, `qwen3-tts`) also needs NVIDIA — `kokoro-fastapi` pulls `torch+cu129` (driver ≥550), and `qwen3-tts` uses its own CUDA torch stack (see [Local TTS servers](#local-tts-servers) below). Supertonic is CPU-only by default and does not require NVIDIA.
 - An **OpenAI** and/or **Gemini API key** for any cloud role.
 
 ## Quick start
@@ -111,6 +111,7 @@ enable_mcp = true                  # load MCP servers from mcp_servers.toml
 stt_url = "http://localhost:9000"  # whispercpp
 tts_url = "http://localhost:8000"  # mlx-audio / supertonic / kokoro-fastapi / qwen3-tts
 llm_url = "http://localhost:8080"  # llamacpp / mlx-vlm
+# whisper_threads = 16             # optional; defaults to half the detected CPU thread count
 
 [vad]
 threshold  = 0.5                   # Silero speech probability threshold (0-1)
@@ -164,7 +165,7 @@ the app auto-falls back to the first compatible one.
 name     = "whisper-turbo"
 provider = "local"
 runtime  = "whispercpp"
-model    = "large-v3-turbo-q8_0"   # whisper.cpp model file suffix
+model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix
 language = "auto"                  # "auto" or a code like "en" / "es"
 
 [[stt]]
@@ -445,7 +446,7 @@ voice-agent/
 | `./setup.sh`              | Install all dependencies (core + local)                             |
 | `./setup.sh --update`     | Update all dependencies                                             |
 | `./setup-llamacpp.sh`     | Install/update `llama-server` (prebuilt, or source build w/ CUDA on Linux+NVIDIA) |
-| `./setup-whispercpp.sh`   | Build whisper.cpp and download the selected whisper model           |
+| `./setup-whispercpp.sh`   | Install/update whisper.cpp and download the selected whisper model (default `large-v3-turbo-q5_0`) |
 | `./setup-supertonic.sh`    | Install the official Supertonic server into `./supertonic-server/` (macOS/Linux CPU, auto-invoked on first switch) |
 | `./setup-kokoro-fastapi.sh` | Clone Kokoro-FastAPI into `./kokoro-fastapi/` + venv + `torch+cu129` + Kokoro-82M model download (Linux+CUDA, auto-invoked on first switch) |
 | `./setup-qwen3-tts.sh`    | Clone Qwen3-TTS into `./qwen3-tts/` + venv + `torch+cu128` + prebuilt flash-attn3 kernels (Linux+CUDA, auto-invoked on first switch) |
@@ -511,7 +512,7 @@ On an API error the tail of the relevant log is rendered as an inline card.
 
 Each local role has exactly one backing process, started on demand, selected by the active model's `runtime`:
 
-- **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server. The app handles VAD before the request, uploads mono 16 kHz WAV directly, and asks whisper.cpp for plain text without timestamps or temperature fallback for lower interactive latency. Local STT entries default `language = "auto"` when omitted, so whisper.cpp detects the spoken language unless a catalog entry pins a specific language code. Runs on macOS and Linux. Restarted when you pick a different local STT model.
+- **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server. The app handles VAD before the request, uploads mono 16 kHz WAV directly, and asks whisper.cpp for plain text without timestamps or temperature fallback for lower interactive latency. Local STT entries default `language = "auto"` when omitted, so whisper.cpp detects the spoken language unless a catalog entry pins a specific language code. The server starts with `-t [local].whisper_threads`, defaulting to half the detected CPU thread count and overrideable via `WHISPER_THREADS`. Runs on macOS and Linux. Restarted when you pick a different local STT model.
 - **TTS servers** (port 8000) — which one runs depends on the active TTS entry's `runtime`:
   - `runtime = "mlx-audio"` — macOS-only. Model-agnostic; swapping between mlx-audio TTS entries does **not** require a restart.
   - `runtime = "supertonic"` — macOS + Linux CPU. Official Supertonic server at `./supertonic-server/`, launched via its own uv venv. Health waits for `/v1/health` to return `{"status": "ok"}`. The app uses native `/v1/tts`, decodes the 44.1 kHz WAV response to PCM, and plays it at 44.1 kHz.

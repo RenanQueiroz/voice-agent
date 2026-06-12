@@ -6,30 +6,33 @@ set -euo pipefail
 #
 # GPU acceleration:
 #   macOS   → Metal (auto-enabled by whisper.cpp's cmake).
-#   Linux   → CUDA if `nvidia-smi` is present (`-DGGML_CUDA=ON`), else CPU.
+#   Linux   → CUDA if `nvidia-smi` is present (`-DGGML_CUDA=ON`),
+#             else OpenBLAS if available (`-DGGML_BLAS=1`), else CPU.
 #
 # Usage:
 #   ./setup-whispercpp.sh [model-name]
-#   e.g.: ./setup-whispercpp.sh large-v3-turbo-q8_0
+#   e.g.: ./setup-whispercpp.sh large-v3-turbo-q5_0
 #
 # Supported models:
 #   tiny, tiny.en, base, base.en, small, small.en, small.en-tdrz,
 #   medium, medium.en, large-v1, large-v2, large-v2-q5_0,
-#   large-v3, large-v3-q5_0, large-v3-turbo, large-v3-turbo-q8_0
+#   large-v3, large-v3-q5_0, large-v3-turbo, large-v3-turbo-q5_0
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$DIR/whispercpp"
 MODELS_DIR="$INSTALL_DIR/models"
 SRC_DIR="$INSTALL_DIR/src"
+STAMP_FILE="$INSTALL_DIR/.built-commit"
+BUILD_MODE_FILE="$INSTALL_DIR/.build-mode"
 REPO="https://github.com/ggml-org/whisper.cpp.git"
 
-MODEL="${1:-large-v3-turbo}"
+MODEL="${1:-large-v3-turbo-q5_0}"
 WHISPER_HF="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 
 SUPPORTED_MODELS=(
     tiny tiny.en base base.en small small.en small.en-tdrz
     medium medium.en large-v1 large-v2 large-v2-q5_0
-    large-v3 large-v3-q5_0 large-v3-turbo large-v3-turbo-q8_0
+    large-v3 large-v3-q5_0 large-v3-turbo large-v3-turbo-q5_0
 )
 
 OS_NAME="$(uname -s)"
@@ -91,36 +94,122 @@ mkdir -p "$INSTALL_DIR" "$MODELS_DIR"
 
 UPDATED=0
 
+detect_build_mode() {
+    if [ "$OS_NAME" = "Linux" ] && command -v nvidia-smi &> /dev/null && nvidia-smi -L &> /dev/null; then
+        echo "linux-cuda"
+    elif [ "$OS_NAME" = "Linux" ] && has_openblas; then
+        echo "linux-openblas"
+    elif [ "$OS_NAME" = "Darwin" ]; then
+        echo "darwin-metal"
+    else
+        echo "cpu"
+    fi
+}
+
+has_openblas() {
+    if command -v pkg-config &> /dev/null && pkg-config --exists openblas; then
+        return 0
+    fi
+    local has_lib=0
+    for path in \
+        /usr/lib/libopenblas.so \
+        /usr/lib64/libopenblas.so \
+        /usr/lib/*/libopenblas.so \
+        /usr/local/lib/libopenblas.so; do
+        if compgen -G "$path" > /dev/null; then
+            has_lib=1
+            break
+        fi
+    done
+    if [ "$has_lib" -eq 0 ] && command -v ldconfig &> /dev/null && ldconfig -p 2>/dev/null | grep -q 'libopenblas\.so'; then
+        has_lib=1
+    fi
+    if [ "$has_lib" -eq 0 ]; then
+        return 1
+    fi
+    for path in \
+        /usr/include/cblas.h \
+        /usr/include/openblas/cblas.h \
+        /usr/include/*/cblas.h \
+        /usr/include/*/openblas*/cblas.h \
+        /usr/local/include/cblas.h \
+        /usr/local/include/openblas/cblas.h; do
+        if compgen -G "$path" > /dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # --- Build whisper.cpp ---
 
-if [ -f "$INSTALL_DIR/whisper-server" ]; then
-    echo "whisper-server binary already exists, skipping build."
+echo "Checking whisper.cpp..."
+
+BUILD_MODE="$(detect_build_mode)"
+REMOTE_SHA="$(git ls-remote "$REPO" HEAD | awk '{print $1}')"
+if [ -z "$REMOTE_SHA" ]; then
+    echo "Error: could not resolve upstream HEAD of $REPO" >&2
+    exit 1
+fi
+
+LOCAL_SHA=""
+if [ -f "$STAMP_FILE" ]; then
+    LOCAL_SHA="$(cat "$STAMP_FILE")"
+fi
+
+LOCAL_BUILD_MODE=""
+if [ -f "$BUILD_MODE_FILE" ]; then
+    LOCAL_BUILD_MODE="$(cat "$BUILD_MODE_FILE")"
+fi
+
+if [ "$LOCAL_SHA" = "$REMOTE_SHA" ] && [ "$LOCAL_BUILD_MODE" = "$BUILD_MODE" ] && [ -x "$INSTALL_DIR/whisper-server" ]; then
+    echo "whisper.cpp is already up to date (commit ${REMOTE_SHA:0:12}, $BUILD_MODE)."
 else
-    echo "Building whisper.cpp..."
+    if [ -n "$LOCAL_SHA" ]; then
+        echo "Updating whisper.cpp: ${LOCAL_SHA:0:12} -> ${REMOTE_SHA:0:12} ($BUILD_MODE)"
+    else
+        echo "Building whisper.cpp from source at ${REMOTE_SHA:0:12} ($BUILD_MODE)"
+    fi
+    if [ -n "$LOCAL_BUILD_MODE" ] && [ "$LOCAL_BUILD_MODE" != "$BUILD_MODE" ]; then
+        echo "Build mode changed: $LOCAL_BUILD_MODE -> $BUILD_MODE"
+    fi
 
     if ! command -v cmake &> /dev/null; then
         install_cmake
     fi
 
-    if [ -d "$SRC_DIR/.git" ]; then
-        echo "Updating existing source..."
-        git -C "$SRC_DIR" pull --ff-only 2>/dev/null || true
-    else
+    if [ ! -d "$SRC_DIR/.git" ]; then
         echo "Cloning whisper.cpp..."
         rm -rf "$SRC_DIR"
         git clone --depth 1 "$REPO" "$SRC_DIR"
+    else
+        echo "Fetching latest commit..."
+        git -C "$SRC_DIR" fetch --depth 1 origin HEAD
+        git -C "$SRC_DIR" reset --hard FETCH_HEAD
     fi
 
+    BUILT_SHA="$(git -C "$SRC_DIR" rev-parse HEAD)"
+
+    rm -rf "$SRC_DIR/build"
+
     CMAKE_FLAGS=(-DCMAKE_BUILD_TYPE=Release)
-    if [ "$OS_NAME" = "Linux" ] && command -v nvidia-smi &> /dev/null && nvidia-smi -L &> /dev/null; then
-        echo "Compiling with CUDA support (nvidia-smi detected)..."
-        CMAKE_FLAGS+=(-DGGML_CUDA=ON)
-    elif [ "$OS_NAME" = "Darwin" ]; then
-        # Metal is enabled by default on macOS (GPU acceleration on Apple Silicon).
-        echo "Compiling with Metal support..."
-    else
-        echo "Compiling CPU-only build..."
-    fi
+    case "$BUILD_MODE" in
+        linux-openblas)
+            echo "Compiling with OpenBLAS support..."
+            CMAKE_FLAGS+=(-DGGML_BLAS=1 -DGGML_BLAS_VENDOR=OpenBLAS)
+            ;;
+        linux-cuda)
+            echo "Compiling with CUDA support (nvidia-smi detected)..."
+            CMAKE_FLAGS+=(-DGGML_CUDA=ON)
+            ;;
+        darwin-metal)
+            # Metal is enabled by default on macOS (GPU acceleration on Apple Silicon).
+            echo "Compiling with Metal support..."
+            ;;
+        *)
+            echo "Compiling CPU-only build..."
+            ;;
+    esac
 
     cmake -B "$SRC_DIR/build" -S "$SRC_DIR" "${CMAKE_FLAGS[@]}"
     cmake --build "$SRC_DIR/build" -j --config Release
@@ -129,7 +218,10 @@ else
     cp "$SRC_DIR/build/bin/whisper-server" "$INSTALL_DIR/"
     cp "$SRC_DIR/build/bin/whisper-cli" "$INSTALL_DIR/" 2>/dev/null || true
 
-    echo "whisper.cpp built successfully."
+    echo "$BUILT_SHA" > "$STAMP_FILE"
+    echo "$BUILD_MODE" > "$BUILD_MODE_FILE"
+
+    echo "whisper.cpp built successfully (${BUILT_SHA:0:12}, $BUILD_MODE)."
     UPDATED=1
 fi
 

@@ -37,7 +37,7 @@
 name     = "whisper-turbo"
 provider = "local"
 runtime  = "whispercpp"
-model    = "large-v3-turbo-q8_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
+model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
 language = "auto"                   # whisper.cpp language hint: "auto" or a code like "en" / "es"
 
 [[stt]]

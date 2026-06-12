@@ -33,6 +33,10 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
+def _default_whisper_threads() -> int:
+    return max(1, (os.cpu_count() or 1) // 2)
+
+
 class ConfigError(SystemExit):
     """Raised when a required config value is missing or invalid."""
 
@@ -238,6 +242,7 @@ class Settings:
     stt_url: str | None
     tts_url: str | None
     llm_url: str | None
+    whisper_threads: int = field(default_factory=_default_whisper_threads)
 
     # Catalogs
     stt_models: list[ModelConfig] = field(default_factory=list)
@@ -775,12 +780,20 @@ def load_settings() -> Settings:
     if vad_max_duration_s is not None and vad_max_duration_s <= 0:
         raise ConfigError("[vad].max_duration_s must be > 0, or omit it to disable")
 
+    whisper_threads = int(
+        _get_optional("WHISPER_THREADS", local.get("whisper_threads"))
+        or _default_whisper_threads()
+    )
+    if whisper_threads <= 0:
+        raise ConfigError("[local].whisper_threads must be > 0")
+
     settings = Settings(
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         gemini_api_key=os.getenv("GEMINI_API_KEY"),
         stt_url=_get_optional("STT_URL", local.get("stt_url")),
         tts_url=_get_optional("TTS_URL", local.get("tts_url")),
         llm_url=_get_optional("LLM_URL", local.get("llm_url")),
+        whisper_threads=whisper_threads,
         stt_models=stt_models,
         llm_models=llm_models,
         tts_models=tts_models,
