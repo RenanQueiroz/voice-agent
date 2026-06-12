@@ -197,6 +197,7 @@ In [voice-agent/providers.py](voice-agent/providers.py):
   - Local ⇒ `WhisperCppSTTModel`. Wrapped in `AudioPassthroughSTTModel` **only** when STT and LLM are both local and the active LLM has `audio_input = true`.
   - Cloud OpenAI with a per-model `api_key` ⇒ explicit `OpenAISTTModel` with a dedicated client.
   - Otherwise a bare model string.
+  - In audio-passthrough mode, the LLM user message is multimodal: a short `input_text` instruction plus a 16 kHz WAV as `input_audio`. llama.cpp currently decodes uploads to the audio projector's target sample rate (Gemma/Qwen/Ultravox-style projectors are 16 kHz), so sending 16 kHz directly avoids an extra server-side resample.
 
 ### TranscriptVoiceWorkflow
 

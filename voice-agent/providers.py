@@ -255,11 +255,13 @@ class SupertonicTTSModel(TTSModel):
             yield pcm[offset : offset + self._PCM_CHUNK_BYTES]
 
 
-def _resample_wav_16k(audio_input: AudioInput) -> bytes:
-    """Convert AudioInput (24kHz int16) to a 16kHz WAV byte buffer."""
+def _audio_input_to_wav(
+    audio_input: AudioInput, target_rate: int | None = None
+) -> bytes:
+    """Convert AudioInput to a mono int16 WAV byte buffer."""
     buf = audio_input.buffer
     src_rate = audio_input.frame_rate
-    dst_rate = 16000
+    dst_rate = target_rate or src_rate
     if src_rate != dst_rate:
         # Simple linear interpolation resampling
         duration = len(buf) / src_rate
@@ -267,6 +269,12 @@ def _resample_wav_16k(audio_input: AudioInput) -> bytes:
         indices = np.linspace(0, len(buf) - 1, n_out)
         buf = np.interp(indices, np.arange(len(buf)), buf.astype(np.float64))
         buf = buf.astype(np.int16)
+    elif buf.dtype != np.int16:
+        if np.issubdtype(buf.dtype, np.floating):
+            buf = np.clip(buf, -1.0, 1.0)
+            buf = (buf * 32767.0).astype(np.int16)
+        else:
+            buf = buf.astype(np.int16)
     # Encode as WAV
     wav_buf = io.BytesIO()
     with wave.open(wav_buf, "wb") as wf:
@@ -275,6 +283,11 @@ def _resample_wav_16k(audio_input: AudioInput) -> bytes:
         wf.setframerate(dst_rate)
         wf.writeframes(buf.tobytes())
     return wav_buf.getvalue()
+
+
+def _wav_16k(audio_input: AudioInput) -> bytes:
+    """Convert AudioInput to a 16 kHz WAV byte buffer for STT / audio LLMs."""
+    return _audio_input_to_wav(audio_input, target_rate=16000)
 
 
 class WhisperCppSTTModel(STTModel):
@@ -296,7 +309,7 @@ class WhisperCppSTTModel(STTModel):
         trace_include_sensitive_data: bool,
         trace_include_sensitive_audio_data: bool,
     ) -> str:
-        wav_bytes = _resample_wav_16k(input)
+        wav_bytes = _wav_16k(input)
         fields: dict[str, str] = {
             "temperature": "0.0",
             "temperature_inc": "0.0",
@@ -502,14 +515,20 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                 and self._background_stt_seconds is not None
             ):
                 self.last_metrics.stt_seconds = self._background_stt_seconds
-            # Downsample to 16kHz to reduce payload (~33% smaller)
-            wav_bytes = _resample_wav_16k(audio_input)
+            # llama.cpp's multimodal audio path resamples uploads to the
+            # model's target rate internally; current audio projectors use
+            # 16 kHz, so send that directly and avoid another resample.
+            wav_bytes = _wav_16k(audio_input)
             audio_b64 = base64.b64encode(wav_bytes).decode()
             content: list[dict] = [
                 {
+                    "type": "input_text",
+                    "text": "Listen to the attached audio and answer the user's spoken request.",
+                },
+                {
                     "type": "input_audio",
                     "input_audio": {"data": audio_b64, "format": "wav"},
-                }
+                },
             ]
             self._input_history.append({"role": "user", "content": content})  # type: ignore[arg-type]
             # STT runs in background — display handled by display_background_transcription
