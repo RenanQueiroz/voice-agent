@@ -49,6 +49,15 @@ class CopyButton(Static):
         self.update("⧉ copy")
 
 
+class ReasoningToggle(Static):
+    """Disclosure row for an AgentTurn's local reasoning text."""
+
+    def on_click(self) -> None:
+        parent = self.parent
+        if isinstance(parent, AgentTurn):
+            parent.toggle_reasoning()
+
+
 # ── Turn cards ───────────────────────────────────────────
 
 
@@ -121,6 +130,8 @@ class AgentTurn(Widget):
     """A card showing the agent's streaming response."""
 
     text: reactive[str] = reactive("", layout=True)
+    reasoning_text: reactive[str] = reactive("", layout=True)
+    reasoning_expanded: reactive[bool] = reactive(True, layout=True)
     metrics_line: reactive[str] = reactive("", layout=True)
     is_interrupted: reactive[bool] = reactive(False)
 
@@ -132,6 +143,8 @@ class AgentTurn(Widget):
         with Horizontal(classes="card-header"):
             yield Static("Agent", classes="label")
             yield CopyButton(lambda: self.text)
+        yield ReasoningToggle("", classes="reasoning-toggle")
+        yield Static("", classes="reasoning-body")
         yield Static("", id="body")
         yield Static("", classes="metrics")
 
@@ -144,11 +157,51 @@ class AgentTurn(Widget):
             self.query_one(".metrics", Static).display = bool(self.metrics_line)
         except Exception:
             pass
+        try:
+            self.query_one(".reasoning-toggle", Static).display = bool(
+                self.reasoning_text
+            )
+            self.query_one(".reasoning-body", Static).display = bool(
+                self.reasoning_text and self.reasoning_expanded
+            )
+        except Exception:
+            pass
         # Flush any text / metrics that arrived before compose finished.
+        if self.reasoning_text:
+            self._refresh_reasoning()
         if self.text:
             self.watch_text(self.text)
         if self.metrics_line:
             self.watch_metrics_line(self.metrics_line)
+
+    def watch_reasoning_text(self, text: str) -> None:
+        self._refresh_reasoning()
+
+    def watch_reasoning_expanded(self, value: bool) -> None:
+        self._refresh_reasoning()
+
+    def _refresh_reasoning(self) -> None:
+        if not self._body_ready:
+            return
+        try:
+            toggle = self.query_one(".reasoning-toggle", Static)
+            body = self.query_one(".reasoning-body", Static)
+        except Exception:
+            return
+        text = self.reasoning_text
+        if not text:
+            toggle.update("")
+            body.update("")
+            toggle.display = False
+            toggle.set_class(False, "-collapsed")
+            body.display = False
+            return
+
+        toggle.update("▾ Reasoning" if self.reasoning_expanded else "▸ Reasoning")
+        toggle.display = True
+        toggle.set_class(not self.reasoning_expanded, "-collapsed")
+        body.update(Text(text, style="dim"))
+        body.display = self.reasoning_expanded
 
     def watch_text(self, text: str) -> None:
         if not self._body_ready:
@@ -173,7 +226,18 @@ class AgentTurn(Widget):
         self.set_class(value, "-interrupted")
 
     def append(self, chunk: str) -> None:
+        if not self.text and self.reasoning_text and self.reasoning_expanded:
+            self.reasoning_expanded = False
         self.text = self.text + chunk
+
+    def append_reasoning(self, chunk: str) -> None:
+        if self.text and not self.reasoning_text:
+            self.reasoning_expanded = False
+        self.reasoning_text = self.reasoning_text + chunk
+
+    def toggle_reasoning(self) -> None:
+        if self.reasoning_text:
+            self.reasoning_expanded = not self.reasoning_expanded
 
     def set_metrics(
         self,

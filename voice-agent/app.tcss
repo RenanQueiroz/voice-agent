@@ -65,6 +65,29 @@ AgentTurn .label {
     text-style: bold;
 }
 
+AgentTurn > .reasoning-toggle {
+    height: 1;
+    color: $text-muted;
+    text-style: dim italic;
+    margin: 0 0 0 0;
+}
+
+AgentTurn > .reasoning-toggle:hover {
+    color: $accent-lighten-1;
+    text-style: italic bold;
+}
+
+AgentTurn > .reasoning-toggle.-collapsed {
+    margin: 0 0 1 0;
+}
+
+AgentTurn > .reasoning-body {
+    height: auto;
+    color: $text-muted;
+    text-style: dim;
+    margin: 0 0 1 0;
+}
+
 AgentTurn > #body {
     height: auto;
     padding: 0 0;

@@ -32,12 +32,13 @@ voice-agent/
   app.py            # Textual App: compose, bindings, pipeline worker,
                     #   action_open_settings, switch_models,
                     #   action_reset_conversation, display-contract methods
-                    #   (user_said, agent_*, metrics, server_*, …)
+                    #   (user_said, agent_*, agent_reasoning_chunk,
+                    #   metrics, server_*, …)
   app.tcss          # Textual CSS
-  widgets.py        # UserTurn, AgentTurn, CopyButton, ToolCard, NoticeCard,
-                    #   ErrorCard, ApprovalCard, StateRow, ModelRow, ToolsRow,
-                    #   ControlRow, StatusFooter, ServerRow, SplashScreen,
-                    #   SettingsScreen
+  widgets.py        # UserTurn, AgentTurn, CopyButton, ReasoningToggle,
+                    #   ToolCard, NoticeCard, ErrorCard, ApprovalCard,
+                    #   StateRow, ModelRow, ToolsRow, ControlRow,
+                    #   StatusFooter, ServerRow, SplashScreen, SettingsScreen
   display.py        # TurnMetrics dataclass + TYPE_CHECKING-only `Display` alias
                     #   to VoiceAgentApp (kept so other modules can annotate
                     #   without an import cycle)
@@ -65,7 +66,7 @@ voice-agent/
 ## Configuration files
 
 - `config.toml` — committed. Everything that isn't a model catalog: `[general]`, `[local]` server URLs, `[vad]`, `[display]`, `[audio]`, `[agent]`, `[shell]`. Catalogs moved out of here (see `models.toml`). Input is always Silero VAD — push-to-talk was removed.
-- `models.toml` — committed. Catalog-style: `[[stt]] / [[llm]] / [[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Local entries must set `runtime` (one of `whispercpp`, `llamacpp`, `mlx-vlm`, `mlx-audio`, `supertonic`, `kokoro-fastapi`, `qwen3-tts`). Cloud entries can set `vendor = "gemini"`, per-model `api_key = "${VAR}"`, and on LLMs `reasoning_effort` / `hosted_tools`. This is what the Settings modal picks from, after OS filtering (see "Runtime registry" below).
+- `models.toml` — committed. Catalog-style: `[[stt]]` / `[[llm]]` / `[[tts]]` arrays, each entry marks `provider = "cloud" | "local"`. Local entries must set `runtime` (one of `whispercpp`, `llamacpp`, `mlx-vlm`, `mlx-audio`, `supertonic`, `kokoro-fastapi`, `qwen3-tts`). Cloud entries can set `vendor = "gemini"` and per-model `api_key = "${VAR}"`; LLM entries can set `reasoning_effort`, and OpenAI cloud LLMs can set `hosted_tools`. This is what the Settings modal picks from, after OS filtering (see "Runtime registry" below).
 - `preferences.toml` — gitignored. Three-line file `[active]` with the active `name` per role. Written by the Settings modal. Copy from `preferences.toml.example`.
 - `.env` — gitignored. `OPENAI_API_KEY`, `GEMINI_API_KEY`, any custom keys referenced via `${VAR}` in a model `api_key`, plus env overrides.
 - `mcp_servers.toml` — gitignored. MCP server definitions. Copy from `mcp_servers.toml.example`. Per-server `enabled = false` skips a server without deleting it.
@@ -84,7 +85,7 @@ Priority: environment variable > `.env` > `config.toml`.
 - composes a `VerticalScroll(#conversation)` above a docked `StatusFooter`
 - pushes a `SplashScreen` modal during initial server setup and pops it when ready
 - runs the entire pipeline (MCP connect + server reconcile + VAD loop) in a single Textual worker launched from `on_mount`
-- exposes the former `Display` surface (`user_said`, `agent_start/chunk/end`, `tool_call/result`, `metrics`, `vad_*`, `processing`, `interrupted`, `server_*`, `api_error/*`, …) as methods. `providers.py`, `audio.py`, `servers.py`, and `pipeline.py` all call into these.
+- exposes the former `Display` surface (`user_said`, `agent_start/chunk/reasoning_chunk/end`, `tool_call/result`, `metrics`, `vad_*`, `processing`, `interrupted`, `server_*`, `api_error/*`, …) as methods. `providers.py`, `audio.py`, `servers.py`, and `pipeline.py` all call into these.
 
 The `Display` name in type annotations is a `TYPE_CHECKING` alias for `VoiceAgentApp` in [voice-agent/display.py](voice-agent/display.py) — keeps import cycles at bay without introducing a real subclass.
 
@@ -203,6 +204,7 @@ The core interception layer. It overrides `SingleAgentVoiceWorkflow.run()` — i
 
 - `run_item_stream_event` → `tool_called` / `tool_output` → `display.tool_call / tool_result`
 - `raw_response_event` with `response.output_text.delta` → `display.agent_chunk` + `_partial_response += chunk`
+- local-only `raw_response_event` with `response.reasoning_summary_text.delta` or `response.reasoning_text.delta` → `display.agent_reasoning_chunk` only. Do **not** yield these chunks from the workflow generator, append them to `_partial_response`, or otherwise feed them to TTS.
 
 Preserve `self._input_history = result.to_input_list()` and `self._current_agent = result.last_agent` at the end of `run()` — the parent relies on those between turns.
 
@@ -228,7 +230,7 @@ Key facts for the concurrency:
 
 The app implements ~30 methods that providers / audio / servers / pipeline call. Don't inline drawing anywhere else. The key families:
 
-- **Conversation**: `user_said`, `agent_start/chunk/end`, `tool_call`, `tool_result`, `interrupted`, `metrics`
+- **Conversation**: `user_said`, `agent_start/chunk/reasoning_chunk/end`, `tool_call`, `tool_result`, `interrupted`, `metrics`
 - **VAD / state**: `vad_speaking`, `vad_silence`, `vad_clear`, `listening`, `muted`, `unmuted`, `processing`, `ready_banner`
 - **Server lifecycle (drives splash)**: `server_setup_start`, `server_starting`, `server_waiting`, `server_ready_one`, `server_all_ready`, `server_failed`, `server_timeout`, `server_install*`, `server_patched`, `setup_failed`
 - **Errors (mount as inline `ErrorCard`)**: `api_error`, `api_error_with_logs`, `connection_error`, `auth_error`, `rate_limit_error`, `tts_stream_error`
@@ -246,6 +248,8 @@ When a new role needs to call the app, add a method here (not a widget subclass)
 `CopyButton(Static)` in [widgets.py](voice-agent/widgets.py) is mounted in the `card-header` `Horizontal` of every `UserTurn` and `AgentTurn`. It takes a `Callable[[], str]` rather than a raw string, so for `AgentTurn` (whose `text` reactive is still streaming) each click copies whatever's present at click-time.
 
 `on_click` calls `self.app.copy_to_clipboard(text)` (Textual's built-in OSC-52 escape), flashes `✓ copied`, then resets after 1.5s. If the terminal doesn't forward OSC-52, the clipboard write is silently no-op — no fallback to subprocess `pbcopy` currently.
+
+`AgentTurn` also owns a `ReasoningToggle` disclosure for local LLM reasoning. It starts expanded while only reasoning chunks have arrived, auto-collapses when the first final `response.output_text.delta` chunk arrives, preserves a one-line visual break before the final response while collapsed, and can be reopened by clicking the disclosure. The copy button intentionally copies only final assistant text, not reasoning text.
 
 ### UserTurn placeholder & STT ordering
 
@@ -296,6 +300,8 @@ hosted_tools     = ["web_search", "code_interpreter"]
 uv run pyright voice-agent              # Type check (whispercpp/ is vendored; ignore)
 uv run ruff format voice-agent/         # Format
 uv run ruff check --fix voice-agent/    # Lint
+uv lock --upgrade                       # Refresh Python dependency pins
+uv sync --extra local --dev             # Sync the full local/dev environment
 uv run python -m voice-agent            # Run
 ./setup.sh                              # Install deps (core + local)
 ./setup.sh --update                     # Update all deps
@@ -313,6 +319,7 @@ uv run python -m voice-agent            # Run
 - **Don't strip the `Omit()` headers or `trust_env=False`** on the Gemini / OpenAI `AsyncOpenAI` clients in `create_agent`. They defend against env-var-induced auth conflicts (`OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`) and rogue proxies that trigger Gemini's "Multiple authentication credentials received" 400.
 - **Gemini's OpenAI-compat endpoint doesn't accept `AQ.`-prefix keys.** Point Gemini LLM entries at a legacy `AIza` key via `api_key = "${GEMINI_API_KEY_LEGACY}"`. The TTS adapter uses `x-goog-api-key` on the native endpoint and accepts either key format.
 - **`reasoning_effort` + hosted tools.** On OpenAI cloud LLMs, hosted tools need `reasoning_effort >= "low"` (tool calls are part of the reasoning loop). `"minimal"` or `"none"` will be rejected by OpenAI. On Gemini 3 preview, default reasoning budget makes TTFT ~16s — always set `reasoning_effort = "minimal"` unless you really need reasoning quality.
+- **Reasoning display is local-only.** OpenAI cloud reasoning summaries require account/model approval and should not be requested or surfaced by default. The UI may display reasoning deltas from local llama.cpp / mlx-vlm-compatible streams, but those deltas must stay out of the TTS generator yield and out of `_partial_response`.
 - **Audio-passthrough gating.** Only wrap STT with `AudioPassthroughSTTModel` when **both** STT and LLM are local (and the LLM's `audio_input = true`). Otherwise the audio never reaches a model that can consume it.
 - **llama.cpp Responses audio gap.** llama-server's `/v1/responses` implementation currently converts Responses requests into Chat Completions internally. It accepts `input_text` and `input_image`, explicitly rejects `input_file`, and treats `input_audio` as invalid. Keep `runtime = "llamacpp"` with `audio_input = true` on `OpenAIChatCompletionsModel` until llama-server accepts Responses `input_audio`; switching that path to Responses would silently destroy the native-audio STT bypass.
 - **Don't capture `workflow` / `pipeline` in the loop.** Read `app.workflow` / `app.pipeline` fresh each turn so runtime swaps and resets apply. The `_switch_lock` prevents the swap/reset from racing a turn.

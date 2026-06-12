@@ -478,6 +478,14 @@ class VoiceAgentApp(App[None]):
             except Exception:
                 pass
 
+    def agent_reasoning_chunk(self, text: str) -> None:
+        if self._current_agent_turn is not None:
+            self._current_agent_turn.append_reasoning(text)
+            try:
+                self._conversation().scroll_end(animate=False)
+            except Exception:
+                pass
+
     def agent_end(self) -> None:
         self._current_agent_turn = None
 

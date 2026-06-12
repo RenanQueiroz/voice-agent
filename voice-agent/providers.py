@@ -395,12 +395,14 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         display: Display,
         show_transcript: bool = True,
         show_metrics: bool = True,
+        show_reasoning: bool = False,
         tool_call_filler: str | None = None,
     ):
         super().__init__(agent)
         self.display = display
         self.show_transcript = show_transcript
         self.show_metrics = show_metrics
+        self.show_reasoning = show_reasoning
         self.tool_call_filler = tool_call_filler
         self.last_metrics = TurnMetrics()
         self.turn_start_time: float = 0.0
@@ -465,6 +467,15 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                 item["content"] = transcription  # type: ignore[index]
                 return True
         return False
+
+    def _reasoning_delta(self, event_data: object) -> str | None:
+        if not self.show_reasoning:
+            return None
+        event_type = getattr(event_data, "type", None)
+        if event_type not in _REASONING_DELTA_EVENTS:
+            return None
+        delta = getattr(event_data, "delta", None)
+        return delta if isinstance(delta, str) and delta else None
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
         transcription = transcription.strip()
@@ -551,6 +562,15 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
                     self.display.tool_result(output)
             elif (
                 event.type == "raw_response_event"
+                and (reasoning_chunk := self._reasoning_delta(event.data)) is not None
+            ):
+                if not agent_started and self.show_transcript:
+                    self.display.agent_start()
+                    agent_started = True
+                if self.show_transcript:
+                    self.display.agent_reasoning_chunk(reasoning_chunk)
+            elif (
+                event.type == "raw_response_event"
                 and event.data.type == "response.output_text.delta"
             ):
                 if first_token_time == 0.0:
@@ -629,6 +649,12 @@ def _hosted_tools(llm: ModelConfig) -> list[Tool]:
 
 _GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 _OPENAI_BASE = "https://api.openai.com/v1"
+_REASONING_DELTA_EVENTS = {
+    "response.reasoning_summary.delta",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning.delta",
+    "response.reasoning_text.delta",
+}
 
 
 def create_agent(
@@ -956,6 +982,7 @@ def create_pipeline(
         display=display,
         show_transcript=settings.show_transcript,
         show_metrics=settings.show_metrics,
+        show_reasoning=settings.llm.provider == "local",
         tool_call_filler=settings.tool_call_filler,
     )
     config = create_pipeline_config(settings)

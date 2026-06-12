@@ -10,6 +10,7 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 - **Runtime model switching**: press `S` (or click *Settings*) to open a modal picker; the active choice is saved to `preferences.toml`.
 - **Per-model API key override**: use `api_key = "${VAR_NAME}"` on a cloud entry to point it at a different vendor key (e.g. a legacy Gemini key for the LLM while the newer key handles TTS).
 - **Reasoning-effort knob**: `reasoning_effort = "minimal"` on a GPT-5 or Gemini-3 entry skips server-side thinking and drops TTFT from ~16s to ~1s for voice.
+- **Local reasoning display**: local LLM reasoning deltas from llama.cpp / mlx-vlm are shown in a collapsible UI region and are never sent to TTS.
 - **Fullscreen Textual TUI**: card-per-turn conversation scrolls above a persistent status footer; clickable Mute / Interrupt / Reset / Settings / Quit buttons plus keyboard shortcuts.
 - **Per-card copy button**: a small `⧉ copy` control on every user and agent card pushes the message to the system clipboard (OSC-52).
 - **Reset conversation**: press `R` (or click *Reset*) to clear history and start fresh without restarting the app.
@@ -277,6 +278,8 @@ voice    = "Sulafat"                    # see https://ai.google.dev/gemini-api/d
 
 **`reasoning_effort` on reasoning-capable LLMs.** Gemini 3 preview flash and GPT-5 models do server-side thinking before emitting tokens; the default (typically `medium`) makes first-token latency unacceptable for voice. `"minimal"` drops it to ~1s. Hosted OpenAI tools require at least `"low"`, since the tool calls are themselves part of the reasoning process.
 
+**Local reasoning display.** When a local LLM server emits reasoning stream events, the agent card shows them in a collapsible **Reasoning** section. The section starts expanded while the model is thinking and auto-collapses on the first final assistant text chunk, preserving the visual break before the final response. Reasoning is UI-only: only final assistant text is yielded to the voice pipeline, copied by the card button, and spoken by TTS. Cloud reasoning summaries are not requested or displayed.
+
 **Voice cloning on local TTS entries.** Set `ref_audio` + `ref_text` to clone a voice with models that support it (CSM is the current flagship; `mlx-community/csm-1b-8bit`). `ref_audio` is a path to a short reference WAV (resolved relative to the project root); `ref_text` is its verbatim transcript. Both must be set together, and only on local TTS entries — mlx-audio handles the cloning server-side. The config loader checks at startup that the file exists.
 
 #### Runtime variables in `[agent].instructions`
@@ -402,10 +405,10 @@ voice-agent/
                     #   action_open_settings, switch_models,
                     #   action_reset_conversation, …
   app.tcss          # Textual CSS (cards, footer, splash, settings modal)
-  widgets.py        # UserTurn / AgentTurn / CopyButton / ToolCard / NoticeCard /
-                    #   ErrorCard / ApprovalCard / StateRow / ModelRow / ToolsRow /
-                    #   ControlRow / StatusFooter / ServerRow / SplashScreen /
-                    #   SettingsScreen
+  widgets.py        # UserTurn / AgentTurn / CopyButton / ReasoningToggle /
+                    #   ToolCard / NoticeCard / ErrorCard / ApprovalCard /
+                    #   StateRow / ModelRow / ToolsRow / ControlRow /
+                    #   StatusFooter / ServerRow / SplashScreen / SettingsScreen
   display.py        # TurnMetrics dataclass + TYPE_CHECKING `Display` alias
   audio.py          # VADRecorder (Silero ONNX), native-rate AudioPlayer
   pipeline.py       # Async _run_vad loop, _process_turn,
@@ -429,7 +432,7 @@ voice-agent/
 - **TTS output sample rate is runtime-derived.** The Agents SDK voice events carry audio arrays but no sample-rate metadata. Existing TTS paths are treated as 24 kHz int16 PCM; Supertonic decodes WAV to int16 PCM and plays it at 44.1 kHz. Do not infer this from chunk length or resample Supertonic down by default.
 - **OpenAI and local Responses-capable LLMs use Responses, not Chat Completions.** To support hosted tools the OpenAI cloud LLM path constructs `OpenAIResponsesModel` with an explicit base URL + `Omit()` headers — this dodges env vars like `OPENAI_BASE_URL` / `OPENAI_ORG_ID` that would otherwise redirect traffic or trigger Gemini's "Multiple authentication credentials received" 400. Local mlx-vlm and llama.cpp text-only paths also use `OpenAIResponsesModel`. The exception is llama.cpp native audio: llama-server currently converts `/v1/responses` to Chat Completions internally and rejects `input_audio`, so `runtime = "llamacpp"` with `audio_input = true` stays on the chat adapter to preserve the STT bypass.
 - **Gemini integration is split across two paths.** LLM goes through Gemini's OpenAI-compatible endpoint (we reuse `OpenAIChatCompletionsModel` with a different base URL). TTS does not have an OpenAI-compat counterpart, so `gemini_tts.py` wraps the native `generateContent` API and exposes it as a `TTSModel`.
-- **Flicker-free streaming.** Each turn is its own widget; agent text is a `reactive` attribute that re-renders only that one widget per token. Rich `Live` is gone; Textual owns the screen.
+- **Flicker-free streaming.** Each turn is its own widget; agent text and local-only reasoning text are `reactive` attributes that re-render only that one widget per token. Rich `Live` is gone; Textual owns the screen.
 - **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped. Passthrough turns add `Audio->LLM` and `BG STT` to the agent metrics line: the first value is time from VAD segment finalization to LLM handoff, and the second is the background Whisper transcript duration used for display/history cleanup. The TTS metric starts when first model text enters the SDK TTS stage and includes playback drain; it does not include LLM TTFT. Stage timings can overlap because TTS may begin before the LLM has finished streaming all text.
 - **Echo suppression by mic muting.** There is no AEC — we mute the microphone while the agent is speaking. Press Space to interrupt instead of speaking over it.
 
@@ -486,6 +489,8 @@ corresponding TTS entry in the Settings modal, or you can run them manually:
 uv run pyright voice-agent
 uv run ruff format voice-agent/
 uv run ruff check --fix voice-agent/
+uv lock --upgrade
+uv sync --extra local --dev
 uv run python -m voice-agent
 ```
 
