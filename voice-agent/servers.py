@@ -180,6 +180,8 @@ class ServerManager:
             str(model_path),
             "-t",
             str(self.settings.whisper_threads),
+            "--flash-attn",
+            "--suppress-nst",
             "--host",
             "0.0.0.0",
             "--port",
