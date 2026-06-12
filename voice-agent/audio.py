@@ -250,7 +250,8 @@ class AudioPlayer:
         sample_rate: int = 24000,
     ) -> tuple[float, float]:
         """Stream TTS audio to speakers.
-        Returns (tts_total_seconds, tts_first_byte_seconds)."""
+        Returns (tts_total_seconds, tts_first_byte_seconds), measured from
+        the SDK's first text-to-TTS lifecycle event when available."""
         self._stopped = False
         # PortAudio output buffering. Two knobs working together:
         #
@@ -281,7 +282,8 @@ class AudioPlayer:
         stream_started = False
         stream_start_mono = 0.0
         total_audio_seconds = 0.0
-        tts_start = time.monotonic()
+        stream_start = time.monotonic()
+        tts_start = 0.0
         first_byte_time = 0.0
         try:
             try:
@@ -292,7 +294,10 @@ class AudioPlayer:
                         if event.data is None:
                             continue
                         if first_byte_time == 0.0:
-                            first_byte_time = time.monotonic() - tts_start
+                            first_byte_mono = time.monotonic()
+                            first_byte_time = first_byte_mono - (
+                                tts_start or stream_start
+                            )
                         if self._stopped:
                             continue
                         if not stream_started:
@@ -314,6 +319,7 @@ class AudioPlayer:
                         )
                     elif event.type == "voice_stream_event_lifecycle":
                         if event.event == "turn_started":
+                            tts_start = time.monotonic()
                             display.turn_started()
                         elif event.event == "turn_ended":
                             display.turn_ended()
@@ -396,4 +402,4 @@ class AudioPlayer:
                 except Exception:
                     pass
             self._player = None
-        return time.monotonic() - tts_start, first_byte_time
+        return time.monotonic() - (tts_start or stream_start), first_byte_time

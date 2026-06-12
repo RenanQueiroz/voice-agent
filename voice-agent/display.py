@@ -22,6 +22,9 @@ class TurnMetrics:
     """Timing metrics for a single conversation turn."""
 
     stt_seconds: float = 0.0
+    audio_passthrough: bool = False
+    audio_passthrough_seconds: float = 0.0
+    llm_start_seconds: float = 0.0
     llm_seconds: float = 0.0
     llm_first_token_seconds: float = 0.0  # TTFT — useful for spotting slow
     # streaming endpoints (Gemini OpenAI-compat in particular) where total

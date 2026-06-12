@@ -351,19 +351,26 @@ class AudioPassthroughSTTModel(STTModel):
         trace_include_sensitive_data: bool,
         trace_include_sensitive_audio_data: bool,
     ) -> str:
-        # Store audio for the workflow to send directly to LLM
-        self._workflow.pending_audio_input = input
+        passthrough_id = self._workflow.start_audio_passthrough(input, time.monotonic())
         # Fire real STT in background for transcript display
-        asyncio.create_task(self._background_stt(input, settings, time.monotonic()))
+        asyncio.create_task(
+            self._background_stt(input, settings, time.monotonic(), passthrough_id)
+        )
         return ""
 
     async def _background_stt(
-        self, input: AudioInput, settings: STTModelSettings, start_time: float
+        self,
+        input: AudioInput,
+        settings: STTModelSettings,
+        start_time: float,
+        passthrough_id: int,
     ) -> None:
         try:
             text = await self._real_stt.transcribe(input, settings, False, False)
             elapsed = time.monotonic() - start_time
-            self._workflow.display_background_transcription(text, elapsed)
+            self._workflow.display_background_transcription(
+                passthrough_id, text, elapsed
+            )
         except Exception:
             pass
 
@@ -399,16 +406,65 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
         self.turn_start_time: float = 0.0
         self._partial_response = ""
         self.pending_audio_input: AudioInput | None = None
+        self.pending_audio_passthrough_at: float | None = None
+        self._audio_passthrough_seq = 0
+        self._pending_audio_passthrough_seq: int | None = None
+        self._active_audio_passthrough_seq: int | None = None
         self._background_transcription: str | None = None
+        self._background_stt_seconds: float | None = None
+        self._background_transcription_seq: int | None = None
 
-    def display_background_transcription(self, text: str, stt_seconds: float) -> None:
+    def start_audio_passthrough(self, input: AudioInput, passthrough_at: float) -> int:
+        """Store audio for direct LLM input and return this turn's passthrough id."""
+        self._audio_passthrough_seq += 1
+        passthrough_id = self._audio_passthrough_seq
+        self.pending_audio_input = input
+        self.pending_audio_passthrough_at = passthrough_at
+        self._pending_audio_passthrough_seq = passthrough_id
+        self._active_audio_passthrough_seq = None
+        self._background_transcription = None
+        self._background_stt_seconds = None
+        self._background_transcription_seq = None
+        return passthrough_id
+
+    def display_background_transcription(
+        self, passthrough_id: int, text: str, stt_seconds: float
+    ) -> None:
         """Called by AudioPassthroughSTTModel when background STT completes."""
+        if passthrough_id not in (
+            self._pending_audio_passthrough_seq,
+            self._active_audio_passthrough_seq,
+        ):
+            return
         self._background_transcription = text
+        self._background_stt_seconds = stt_seconds
+        self._background_transcription_seq = passthrough_id
         if text and self.show_transcript:
             self.display.user_said(
                 text, stt_seconds=stt_seconds if self.show_metrics else 0.0
             )
         self.last_metrics.stt_seconds = stt_seconds
+        if text:
+            self._replace_audio_history_with_text(text)
+        if (
+            self.show_metrics
+            and self.last_metrics.audio_passthrough
+            and self.last_metrics.total_seconds > 0
+        ):
+            self.display.metrics(self.last_metrics)
+
+    def _replace_audio_history_with_text(self, transcription: str) -> bool:
+        """Replace the latest audio content item in history once STT catches up."""
+        for item in reversed(self._input_history):
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")  # type: ignore[union-attr]
+            if isinstance(content, list) and any(
+                isinstance(p, dict) and p.get("type") == "input_audio" for p in content
+            ):
+                item["content"] = transcription  # type: ignore[index]
+                return True
+        return False
 
     async def run(self, transcription: str) -> AsyncIterator[str]:
         transcription = transcription.strip()
@@ -420,6 +476,21 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             # Audio-input mode: send audio directly to LLM, skip STT latency
             audio_input = self.pending_audio_input
             self.pending_audio_input = None
+            passthrough_at = self.pending_audio_passthrough_at
+            self.pending_audio_passthrough_at = None
+            passthrough_id = self._pending_audio_passthrough_seq
+            self._pending_audio_passthrough_seq = None
+            self._active_audio_passthrough_seq = passthrough_id
+            self.last_metrics.audio_passthrough = True
+            if passthrough_at is not None and self.turn_start_time > 0:
+                self.last_metrics.audio_passthrough_seconds = max(
+                    0.0, passthrough_at - self.turn_start_time
+                )
+            if (
+                self._background_transcription_seq == passthrough_id
+                and self._background_stt_seconds is not None
+            ):
+                self.last_metrics.stt_seconds = self._background_stt_seconds
             # Downsample to 16kHz to reduce payload (~33% smaller)
             wav_bytes = _resample_wav_16k(audio_input)
             audio_b64 = base64.b64encode(wav_bytes).decode()
@@ -441,6 +512,8 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             self._input_history.append({"role": "user", "content": transcription})
 
         llm_start = time.monotonic()
+        if self.turn_start_time > 0:
+            self.last_metrics.llm_start_seconds = llm_start - self.turn_start_time
         first_token_time = 0.0
         token_count = 0
         agent_started = False
@@ -498,17 +571,15 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
 
         # Replace audio content in history with text transcription to prevent
         # the base64 audio blob from bloating context on subsequent LLM calls
-        if self._background_transcription:
-            for item in self._input_history:
-                if not isinstance(item, dict) or item.get("role") != "user":
-                    continue
-                content = item.get("content")  # type: ignore[union-attr]
-                if isinstance(content, list) and any(
-                    isinstance(p, dict) and p.get("type") == "input_audio"
-                    for p in content
-                ):
-                    item["content"] = self._background_transcription  # type: ignore[index]
+        if (
+            self._background_transcription
+            and self._background_transcription_seq == self._active_audio_passthrough_seq
+        ):
+            self._replace_audio_history_with_text(self._background_transcription)
             self._background_transcription = None
+            self._background_stt_seconds = None
+            self._background_transcription_seq = None
+            self._active_audio_passthrough_seq = None
 
         self.last_metrics.llm_seconds = time.monotonic() - llm_start
         self.last_metrics.llm_first_token_seconds = first_token_time

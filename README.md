@@ -22,7 +22,7 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
 - **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux when an NVIDIA GPU is detected), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
 - **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-lm` / `mlx-vlm` / `mlx-audio` / `supertonic` / `kokoro-fastapi` / `qwen3-tts`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
-- **Per-turn metrics**: STT, LLM (with TTFT), TTS, and total timing inline with each turn.
+- **Per-turn metrics**: STT, LLM (with TTFT), TTS (with first-audio latency), and total timing inline with each turn. Audio-input local LLM turns also show `Audio->LLM` and background Whisper timing so it is clear whether STT stayed off the response path.
 
 ## Prerequisites
 
@@ -431,7 +431,7 @@ voice-agent/
 - **OpenAI LLMs use Responses, not Chat Completions.** To support hosted tools the OpenAI cloud LLM path constructs `OpenAIResponsesModel` with an explicit base URL + `Omit()` headers — this dodges env vars like `OPENAI_BASE_URL` / `OPENAI_ORG_ID` that would otherwise redirect traffic or trigger Gemini's "Multiple authentication credentials received" 400.
 - **Gemini integration is split across two paths.** LLM goes through Gemini's OpenAI-compatible endpoint (we reuse `OpenAIChatCompletionsModel` with a different base URL). TTS does not have an OpenAI-compat counterpart, so `gemini_tts.py` wraps the native `generateContent` API and exposes it as a `TTSModel`.
 - **Flicker-free streaming.** Each turn is its own widget; agent text is a `reactive` attribute that re-renders only that one widget per token. Rich `Live` is gone; Textual owns the screen.
-- **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped.
+- **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped. Passthrough turns add `Audio->LLM` and `BG STT` to the agent metrics line: the first value is time from VAD segment finalization to LLM handoff, and the second is the background Whisper transcript duration used for display/history cleanup. The TTS metric starts when first model text enters the SDK TTS stage and includes playback drain; it does not include LLM TTFT. Stage timings can overlap because TTS may begin before the LLM has finished streaming all text.
 - **Echo suppression by mic muting.** There is no AEC — we mute the microphone while the agent is speaking. Press Space to interrupt instead of speaking over it.
 
 ## Scripts

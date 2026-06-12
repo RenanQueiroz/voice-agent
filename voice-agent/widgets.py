@@ -185,13 +185,21 @@ class AgentTurn(Widget):
             return f"{role} [{name}]" if name else role
 
         parts: list[str] = []
+        if m.audio_passthrough:
+            audio_handoff = m.llm_start_seconds or m.audio_passthrough_seconds
+            parts.append(f"Audio->LLM {audio_handoff:.1f}s")
+            if m.stt_seconds > 0:
+                parts.append(f"BG STT {m.stt_seconds:.1f}s")
         if m.llm_seconds > 0:
             llm_part = f"{_label('LLM', llm_name)} {m.llm_seconds:.1f}s"
             if m.llm_first_token_seconds > 0:
                 llm_part += f" (TTFT {m.llm_first_token_seconds:.1f}s)"
             parts.append(llm_part)
         if m.tts_seconds > 0:
-            parts.append(f"{_label('TTS', tts_name)} {m.tts_seconds:.1f}s")
+            tts_part = f"{_label('TTS', tts_name)} {m.tts_seconds:.1f}s"
+            if m.tts_first_byte_seconds > 0:
+                tts_part += f" (first audio {m.tts_first_byte_seconds:.1f}s)"
+            parts.append(tts_part)
         if m.total_seconds > 0:
             parts.append(f"Total {m.total_seconds:.1f}s")
         self.metrics_line = " · ".join(parts)
