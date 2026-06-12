@@ -120,6 +120,12 @@ class ModelConfig:
     # never live in the committed models.toml.
     api_key: str | None = None
 
+    # STT-only: language hint for transcription. whisper.cpp accepts "auto"
+    # for language detection; ISO-style language codes such as "en", "es",
+    # or "pt" force a specific language. Local whisper.cpp entries default
+    # to "auto" when omitted.
+    language: str | None = None
+
     # TTS-only
     voice: str | None = None
 
@@ -386,6 +392,14 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                 )
             config.vendor = vendor
 
+        if role == "stt":
+            language = entry.get("language")
+            if language is not None and not isinstance(language, str):
+                raise ConfigError(
+                    f"[[stt]] '{name}' has a non-string 'language': {language!r}"
+                )
+            config.language = language
+
         if role == "tts":
             voice = entry.get("voice")
             if voice is not None and not isinstance(voice, str):
@@ -601,6 +615,8 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                     f"{allowed} (got {runtime!r})."
                 )
             config.runtime = runtime
+            if role == "stt" and config.language is None:
+                config.language = "auto"
 
             if role == "llm":
                 config.audio_input = bool(entry.get("audio_input", False))

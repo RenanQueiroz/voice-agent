@@ -966,6 +966,7 @@ def create_pipeline_config(settings: Settings) -> VoicePipelineConfig:
 
     return VoicePipelineConfig(
         model_provider=provider,
+        stt_settings=STTModelSettings(language=settings.stt.language),
         tts_settings=TTSModelSettings(**tts_settings_kwargs),  # type: ignore[arg-type]
         tracing_disabled=True,
     )

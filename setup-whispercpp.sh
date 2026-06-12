@@ -10,12 +10,12 @@ set -euo pipefail
 #
 # Usage:
 #   ./setup-whispercpp.sh [model-name]
-#   e.g.: ./setup-whispercpp.sh large-v3-turbo-q5_0
+#   e.g.: ./setup-whispercpp.sh large-v3-turbo-q8_0
 #
 # Supported models:
 #   tiny, tiny.en, base, base.en, small, small.en, small.en-tdrz,
 #   medium, medium.en, large-v1, large-v2, large-v2-q5_0,
-#   large-v3, large-v3-q5_0, large-v3-turbo, large-v3-turbo-q5_0
+#   large-v3, large-v3-q5_0, large-v3-turbo, large-v3-turbo-q8_0
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$DIR/whispercpp"
@@ -29,7 +29,7 @@ WHISPER_HF="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 SUPPORTED_MODELS=(
     tiny tiny.en base base.en small small.en small.en-tdrz
     medium medium.en large-v1 large-v2 large-v2-q5_0
-    large-v3 large-v3-q5_0 large-v3-turbo large-v3-turbo-q5_0
+    large-v3 large-v3-q5_0 large-v3-turbo large-v3-turbo-q8_0
 )
 
 OS_NAME="$(uname -s)"

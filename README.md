@@ -164,7 +164,8 @@ the app auto-falls back to the first compatible one.
 name     = "whisper-turbo"
 provider = "local"
 runtime  = "whispercpp"
-model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix
+model    = "large-v3-turbo-q8_0"   # whisper.cpp model file suffix
+language = "auto"                  # "auto" or a code like "en" / "es"
 
 [[stt]]
 name     = "gpt-4o-transcribe"
@@ -428,7 +429,7 @@ voice-agent/
 ### Key design decisions
 
 - **Per-role providers, not a single mode.** Each `[[stt]] / [[llm]] / [[tts]]` entry marks itself `provider = "cloud" | "local"` (cloud entries can also set `vendor = "gemini"`). The `ServerManager` is a reconciler: it starts only the local server(s) needed by the currently active selection and restarts on a swap.
-- **Local servers use runtime-specific adapters where needed.** mlx-audio, mlx-vlm, and llama-server expose `/v1/...` endpoints, so we reuse the SDK's `OpenAITTSModel` / `OpenAIResponsesModel` and point `AsyncOpenAI` at localhost. Local STT uses a custom `WhisperCppSTTModel` hitting whisper-server's `/inference`; the app already sends mono 16 kHz WAV segments from Python-side Silero VAD, so whisper-server runs without its own VAD or ffmpeg conversion. Supertonic also exposes an OpenAI-compatible alias, but the app uses its native `/v1/tts` endpoint so it can preserve the official server's 44.1 kHz WAV output.
+- **Local servers use runtime-specific adapters where needed.** mlx-audio, mlx-vlm, and llama-server expose `/v1/...` endpoints, so we reuse the SDK's `OpenAITTSModel` / `OpenAIResponsesModel` and point `AsyncOpenAI` at localhost. Local STT uses a custom `WhisperCppSTTModel` hitting whisper-server's `/inference`; the app already sends mono 16 kHz WAV segments from Python-side Silero VAD, so whisper-server runs without its own VAD or ffmpeg conversion. The `[[stt]].language` field is sent per request (`"auto"` for whisper.cpp language detection, or a fixed code like `"en"` / `"es"`). Supertonic also exposes an OpenAI-compatible alias, but the app uses its native `/v1/tts` endpoint so it can preserve the official server's 44.1 kHz WAV output.
 - **TTS output sample rate is runtime-derived.** The Agents SDK voice events carry audio arrays but no sample-rate metadata. Existing TTS paths are treated as 24 kHz int16 PCM; Supertonic decodes WAV to int16 PCM and plays it at 44.1 kHz. Do not infer this from chunk length or resample Supertonic down by default.
 - **OpenAI and local Responses-capable LLMs use Responses, not Chat Completions.** To support hosted tools the OpenAI cloud LLM path constructs `OpenAIResponsesModel` with an explicit base URL + `Omit()` headers — this dodges env vars like `OPENAI_BASE_URL` / `OPENAI_ORG_ID` that would otherwise redirect traffic or trigger Gemini's "Multiple authentication credentials received" 400. Local mlx-vlm and llama.cpp text-only paths also use `OpenAIResponsesModel`. The exception is llama.cpp native audio: llama-server currently converts `/v1/responses` to Chat Completions internally and rejects `input_audio`, so `runtime = "llamacpp"` with `audio_input = true` stays on the chat adapter to preserve the STT bypass.
 - **Gemini integration is split across two paths.** LLM goes through Gemini's OpenAI-compatible endpoint (we reuse `OpenAIChatCompletionsModel` with a different base URL). TTS does not have an OpenAI-compat counterpart, so `gemini_tts.py` wraps the native `generateContent` API and exposes it as a `TTSModel`.
@@ -510,7 +511,7 @@ On an API error the tail of the relevant log is rendered as an inline card.
 
 Each local role has exactly one backing process, started on demand, selected by the active model's `runtime`:
 
-- **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server. The app handles VAD before the request, uploads mono 16 kHz WAV directly, and asks whisper.cpp for plain text without timestamps or temperature fallback for lower interactive latency. Runs on macOS and Linux. Restarted when you pick a different local STT model.
+- **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server. The app handles VAD before the request, uploads mono 16 kHz WAV directly, and asks whisper.cpp for plain text without timestamps or temperature fallback for lower interactive latency. Local STT entries default `language = "auto"` when omitted, so whisper.cpp detects the spoken language unless a catalog entry pins a specific language code. Runs on macOS and Linux. Restarted when you pick a different local STT model.
 - **TTS servers** (port 8000) — which one runs depends on the active TTS entry's `runtime`:
   - `runtime = "mlx-audio"` — macOS-only. Model-agnostic; swapping between mlx-audio TTS entries does **not** require a restart.
   - `runtime = "supertonic"` — macOS + Linux CPU. Official Supertonic server at `./supertonic-server/`, launched via its own uv venv. Health waits for `/v1/health` to return `{"status": "ok"}`. The app uses native `/v1/tts`, decodes the 44.1 kHz WAV response to PCM, and plays it at 44.1 kHz.
