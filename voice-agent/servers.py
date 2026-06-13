@@ -326,6 +326,8 @@ class ServerManager:
                         str(_PROJECT_ROOT / model.preset),
                         "--models-max",
                         "1",
+                        "--sleep-idle-seconds",
+                        "90",
                     ]
                 )
             return self._launch("llm", cmd, f"llama-server (port {port})")
@@ -450,7 +452,7 @@ class ServerManager:
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)
                         last_elapsed = t
-                except httpx.ConnectError, httpx.ConnectTimeout:
+                except (httpx.ConnectError, httpx.ConnectTimeout):
                     # ConnectError: TCP refused (not listening yet).
                     # ConnectTimeout: SYN got no answer while the process is
                     # running but has not bound the port yet. Both mean "not
@@ -503,7 +505,7 @@ class ServerManager:
                     continue
                 try:
                     raw = (entry / "cmdline").read_bytes()
-                except OSError, PermissionError:
+                except (OSError, PermissionError):
                     continue
                 # cmdline is null-separated argv; we only care about argv[0]
                 argv0 = raw.split(b"\x00", 1)[0].decode(errors="replace")
@@ -519,7 +521,7 @@ class ServerManager:
                         text=True,
                         timeout=2,
                     )
-                except FileNotFoundError, subprocess.TimeoutExpired:
+                except (FileNotFoundError, subprocess.TimeoutExpired):
                     return  # no pgrep available; give up
                 for line in result.stdout.strip().splitlines():
                     try:
@@ -538,10 +540,10 @@ class ServerManager:
         for pid in orphans:
             try:
                 os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError, PermissionError:
+            except (ProcessLookupError, PermissionError):
                 try:
                     os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError, PermissionError:
+                except (ProcessLookupError, PermissionError):
                     pass
         # Short grace period, then SIGKILL any survivors.
         import time
@@ -550,10 +552,10 @@ class ServerManager:
         for pid in orphans:
             try:
                 os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError, PermissionError:
+            except (ProcessLookupError, PermissionError):
                 try:
                     os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError, PermissionError:
+                except (ProcessLookupError, PermissionError):
                     pass
 
     def _stop_role(self, role: Role, grace_timeout: float = 5.0) -> None:
@@ -570,7 +572,7 @@ class ServerManager:
             # don't leave VRAM-holding children behind.
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError, PermissionError:
+            except (ProcessLookupError, PermissionError):
                 # Fall back to the direct-proc signal if the group is
                 # already gone or we can't signal it.
                 proc.send_signal(signal.SIGTERM)
@@ -579,7 +581,7 @@ class ServerManager:
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError, PermissionError:
+                except (ProcessLookupError, PermissionError):
                     proc.kill()
 
     # ── Helpers ───────────────────────────────────────────

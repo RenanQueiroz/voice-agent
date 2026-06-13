@@ -43,4 +43,5 @@ exec "$LLAMA_BIN" \
     --port "$PORT" \
     --models-preset "$PRESET" \
     --models-max 1 \
+    --sleep-idle-seconds 90 \
     "$@"
