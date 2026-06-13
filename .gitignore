@@ -33,3 +33,6 @@ qwen3-tts/
 
 # Active model selections (user-specific, written by the Switch modal)
 preferences.toml
+
+# Local planning notes
+plans/
