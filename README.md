@@ -454,9 +454,10 @@ voice-agent/
 | `./setup-qwen3-tts.sh`    | Clone Qwen3-TTS into `./qwen3-tts/` + venv + `torch+cu128` + prebuilt flash-attn3 kernels (Linux+CUDA, auto-invoked on first switch) |
 
 `./start-llamacpp.sh` uses the same `./llamacpp/llama-server` binary as the app and starts it with
-`--models-preset ./llamacpp-models.ini`. If the binary is missing, it runs `./setup-llamacpp.sh` first.
+`--models-preset ./llamacpp-models.ini --models-max 1`. If the binary is missing, it runs `./setup-llamacpp.sh` first.
 Override the bind address, port, or preset with `LLAMACPP_HOST`, `LLAMACPP_PORT`, or `LLAMACPP_PRESET`;
-any extra command-line arguments are forwarded to `llama-server`.
+any extra command-line arguments are forwarded to `llama-server` after these defaults, so standalone runs can
+override options such as `--models-max`.
 
 `./bench.sh` reads `llamacpp-models.ini`, lets you choose a model section with arrow keys + Enter, and
 runs `./llamacpp/llama-bench` against the preset's supported flags (`hf`/`model`, batch sizes, KV cache
@@ -534,7 +535,7 @@ Each local role has exactly one backing process, started on demand, selected by 
   - `runtime = "kokoro-fastapi"` — Linux + CUDA. FastAPI server at `./kokoro-fastapi/`, launched via its own uv venv. Kokoro-82M model downloaded on first run (~80 MB).
   - `runtime = "qwen3-tts"` — Linux + CUDA. FastAPI server at `./qwen3-tts/` running the `optimized` backend (torch.compile + CUDA graphs + prebuilt flash-attn3 kernels). First boot lazy-downloads the model from Hugging Face (0.6B ≈ 1.2 GB) and pays torch.compile warmup cost; subsequent boots reuse `.cache/qwen3-tts/torchinductor/`.
 - **LLM server** (port 8080) — backend is per-entry:
-  - `runtime = "llamacpp"` — `llama-server` binary, health via `/health`, models from the preset file. Runs on macOS and Linux.
+  - `runtime = "llamacpp"` — `llama-server` binary, health via `/health`, models from the preset file, capped at one simultaneously loaded model via `--models-max 1`. Runs on macOS and Linux.
   - `runtime = "mlx-vlm"` — Python module, supports `--kv-bits` / `--kv-quant-scheme`, health via `/v1/models`. macOS-only.
 
 The reconciler restarts the LLM server when you pick a different local LLM (different model or runtime).

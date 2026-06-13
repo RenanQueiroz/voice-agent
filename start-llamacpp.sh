@@ -42,4 +42,5 @@ exec "$LLAMA_BIN" \
     --host "$HOST" \
     --port "$PORT" \
     --models-preset "$PRESET" \
+    --models-max 1 \
     "$@"

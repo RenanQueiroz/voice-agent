@@ -320,7 +320,14 @@ class ServerManager:
                 str(port),
             ]
             if model.preset:
-                cmd.extend(["--models-preset", str(_PROJECT_ROOT / model.preset)])
+                cmd.extend(
+                    [
+                        "--models-preset",
+                        str(_PROJECT_ROOT / model.preset),
+                        "--models-max",
+                        "1",
+                    ]
+                )
             return self._launch("llm", cmd, f"llama-server (port {port})")
 
         if runtime != "mlx-vlm":
