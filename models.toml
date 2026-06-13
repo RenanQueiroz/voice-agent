@@ -57,8 +57,8 @@ model    = "gpt-4o-transcribe"
 # ── LLM catalog ───────────────────────────────────────────
 # Local entries must set `runtime` (llamacpp / mlx-vlm). `audio_input`
 # lets the LLM accept audio directly, skipping STT latency; only meaningful
-# when BOTH the STT and LLM are local (they share the same whisper audio
-# buffer — see providers.py).
+# when BOTH the STT and LLM are local (the original VAD segment is sent to
+# the LLM while local STT runs in the background — see providers.py).
 [[llm]]
 name        = "gemma-4-e4b-it-qat (llamacpp)"
 provider    = "local"

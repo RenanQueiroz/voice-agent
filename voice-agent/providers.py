@@ -610,10 +610,6 @@ class TranscriptVoiceWorkflow(SingleAgentVoiceWorkflow):
             audio_b64 = base64.b64encode(wav_bytes).decode()
             content: list[dict] = [
                 {
-                    "type": "input_text",
-                    "text": "Listen to the attached audio and answer the user's spoken request.",
-                },
-                {
                     "type": "input_audio",
                     "input_audio": {"data": audio_b64, "format": "wav"},
                 },
