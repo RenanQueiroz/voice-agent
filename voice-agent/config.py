@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 
 from .platform_info import current_os
 from .preferences import load_preferences
-from .runtimes import is_runtime_supported, runtimes_for_role
+from .runtimes import get_runtime, is_runtime_supported, runtimes_for_role
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -127,8 +127,14 @@ class ModelConfig:
     # STT-only: language hint for transcription. whisper.cpp accepts "auto"
     # for language detection; ISO-style language codes such as "en", "es",
     # or "pt" force a specific language. Local whisper.cpp entries default
-    # to "auto" when omitted.
+    # to "auto" when omitted. ONNX ASR Parakeet entries use auto-detection;
+    # forced language codes may not be honored by that model family.
     language: str | None = None
+
+    # STT-only, onnx-asr runtime: optional ONNX model quantization. Phase one
+    # only supports the documented "int8" value; omitted means the upstream
+    # non-quantized model files.
+    quantization: str | None = None
 
     # TTS-only
     voice: str | None = None
@@ -183,7 +189,7 @@ class ModelConfig:
     split: str | None = None
 
     # Local-only: which runtime serves this model. One of the IDs registered
-    # in `runtimes.RUNTIMES` (whispercpp for STT; llamacpp / mlx-vlm
+    # in `runtimes.RUNTIMES` (whispercpp / onnx-asr for STT; llamacpp / mlx-vlm
     # for LLM; mlx-audio for TTS). Catalog parsing filters out entries whose
     # runtime isn't supported on the current OS — mlx-* runtimes silently
     # drop off on Linux because there are no Linux wheels for the mlx stack.
@@ -404,6 +410,28 @@ def _parse_catalog(role: Role, entries: list[dict]) -> list[ModelConfig]:
                     f"[[stt]] '{name}' has a non-string 'language': {language!r}"
                 )
             config.language = language
+
+            quantization = entry.get("quantization")
+            if quantization is not None:
+                if not isinstance(quantization, str):
+                    raise ConfigError(
+                        f"[[stt]] '{name}' has a non-string 'quantization': "
+                        f"{quantization!r}"
+                    )
+                quantization = quantization.strip() or None
+            if quantization is not None:
+                if provider != "local" or entry.get("runtime") != "onnx-asr":
+                    raise ConfigError(
+                        f"[[stt]] '{name}' has quantization = {quantization!r}, "
+                        "but quantization only applies to local STT entries "
+                        "with runtime = 'onnx-asr'."
+                    )
+                if quantization != "int8":
+                    raise ConfigError(
+                        f"[[stt]] '{name}' has unsupported quantization "
+                        f"{quantization!r}. Allowed: 'int8'."
+                    )
+                config.quantization = quantization
 
         if role == "tts":
             voice = entry.get("voice")
@@ -886,6 +914,14 @@ def _validate_active_requirements(settings: Settings) -> None:
     """Check the URL/API-key requirements implied by the current active models.
     A model with its own `api_key` counts as self-sufficient — it doesn't
     need the vendor-wide env-var fallback."""
+
+    def needs_url(model: ModelConfig) -> bool:
+        if model.provider != "local":
+            return False
+        if not model.runtime:
+            return True
+        return get_runtime(model.runtime).requires_url
+
     active = [settings.stt, settings.llm, settings.tts]
     needs_openai = any(
         m.provider == "cloud"
@@ -896,9 +932,9 @@ def _validate_active_requirements(settings: Settings) -> None:
     needs_gemini = any(
         m.provider == "cloud" and m.vendor == "gemini" and not m.api_key for m in active
     )
-    needs_local_stt = settings.stt.provider == "local"
-    needs_local_llm = settings.llm.provider == "local"
-    needs_local_tts = settings.tts.provider == "local"
+    needs_local_stt = needs_url(settings.stt)
+    needs_local_llm = needs_url(settings.llm)
+    needs_local_tts = needs_url(settings.tts)
 
     if needs_openai and not settings.openai_api_key:
         raise ConfigError(

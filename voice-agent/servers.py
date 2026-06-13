@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -73,8 +74,39 @@ _PROJECT_ROOT = Path(__file__).parent.parent
 # How long to wait for servers to become healthy (includes model download time)
 STARTUP_TIMEOUT = 600  # 10 minutes
 _LOG_DIR = _PROJECT_ROOT / "logs"
+_ONNX_ASR_CACHE_DIR = _PROJECT_ROOT / ".cache" / "onnx-asr"
 
 Role = Literal["stt", "llm", "tts"]
+
+
+def _safe_cache_component(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
+    return safe or "model"
+
+
+def _onnx_asr_model_dir(model_name: str, quantization: str | None) -> Path:
+    suffix = quantization or "fp32"
+    return _ONNX_ASR_CACHE_DIR / f"{_safe_cache_component(model_name)}-{suffix}"
+
+
+def _onnx_asr_required_files(quantization: str | None) -> tuple[str, ...]:
+    model_suffix = ".int8.onnx" if quantization == "int8" else ".onnx"
+    return (
+        "config.json",
+        "vocab.txt",
+        f"encoder-model{model_suffix}",
+        f"decoder_joint-model{model_suffix}",
+    )
+
+
+def _onnx_asr_cache_populated(model_dir: Path, quantization: str | None) -> bool:
+    if not model_dir.is_dir():
+        return False
+    for name in _onnx_asr_required_files(quantization):
+        path = model_dir / name
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+    return True
 
 
 class ServerManager:
@@ -89,8 +121,9 @@ class ServerManager:
         # for. When the user picks a different local model for the same role,
         # this mismatches and we restart.
         self._started_for: dict[Role, str] = {}
-        # Track which local role has had deps installed already this session.
-        self._deps_ready: set[Role] = set()
+        # Track which local role/model pairs have had deps prepared already
+        # this session. ONNX ASR model cache preparation is model-specific.
+        self._deps_ready: set[tuple[Role, str]] = set()
 
         # Reap any orphan servers left over from a previous app session
         # that didn't shut down cleanly (e.g. user mashed Ctrl+C and our
@@ -107,16 +140,23 @@ class ServerManager:
         Returns True on success, False (and mounts/logs an error) on failure.
         """
         active = self._active_local_roles()
+        managed_active: dict[Role, ModelConfig] = {
+            role: model
+            for role, model in active.items()
+            if self._runtime_is_process_managed(model)
+        }
 
         # Stop processes that are no longer needed or whose model changed.
         for role in list(self._procs):
-            wanted = active.get(role)
+            wanted = managed_active.get(role)
             if wanted is None or wanted.name != self._started_for.get(role):
                 self._stop_role(role)
 
-        # Start any missing processes.
+        # Prepare every active local runtime, and start any missing managed
+        # processes. In-process runtimes (currently onnx-asr) stop after deps
+        # and model files are ready.
         for role, model in active.items():
-            if role in self._procs:
+            if self._runtime_is_process_managed(model) and role in self._procs:
                 continue
             ok = await self._start_role(role, model)
             if not ok:
@@ -124,10 +164,10 @@ class ServerManager:
 
         # Final health + readiness wait for anything we just started.
         to_wait: list[tuple[Role, ModelConfig]] = [
-            (role, active[role])
-            for role in active
+            (role, managed_active[role])
+            for role in managed_active
             if role not in self._started_for  # newly launched
-            or self._started_for[role] != active[role].name  # shouldn't happen
+            or self._started_for[role] != managed_active[role].name  # shouldn't happen
         ]
         for role, model in to_wait:
             ok = await self._wait_ready(role, model)
@@ -135,7 +175,7 @@ class ServerManager:
                 return False
             self._started_for[role] = model.name
 
-        if active and all(role in self._procs for role in active):
+        if active and all(role in self._procs for role in managed_active):
             self.display.server_all_ready()
         return True
 
@@ -155,14 +195,18 @@ class ServerManager:
     # ── Role starters ─────────────────────────────────────
 
     async def _start_role(self, role: Role, model: ModelConfig) -> bool:
-        """Install deps (once per role) and start the process for this role."""
-        if role not in self._deps_ready:
+        """Install deps/cache for this role/model and start its process if any."""
+        deps_key = (role, model.name)
+        if deps_key not in self._deps_ready:
             ok = self._install_deps_for(role, model)
             if not ok:
                 return False
-            self._deps_ready.add(role)
+            self._deps_ready.add(deps_key)
 
         self._apply_patches(role, model)
+
+        if not self._runtime_is_process_managed(model):
+            return True
 
         if role == "stt":
             return self._start_stt(model)
@@ -399,12 +443,14 @@ class ServerManager:
         return True
 
     async def _wait_ready(self, role: Role, model: ModelConfig) -> bool:
-        url = self._require_url(role)
-        display_name = self._display_name(role)
         # Runtime decides both the health path and when a response
         # counts as "ready" (Qwen3 reports 200 during torch.compile
         # warmup — its ready_check inspects the body).
         runtime = RUNTIMES.get(model.runtime or "")
+        if runtime and not runtime.managed_process:
+            return True
+        url = self._require_url(role)
+        display_name = self._display_name(role)
         return await self._wait_for_health(url, display_name, role, runtime)
 
     async def _wait_for_health(
@@ -452,7 +498,7 @@ class ServerManager:
                     if t != last_elapsed:
                         self.display.server_waiting(display_name, t)
                         last_elapsed = t
-                except (httpx.ConnectError, httpx.ConnectTimeout):
+                except httpx.ConnectError, httpx.ConnectTimeout:
                     # ConnectError: TCP refused (not listening yet).
                     # ConnectTimeout: SYN got no answer while the process is
                     # running but has not bound the port yet. Both mean "not
@@ -505,7 +551,7 @@ class ServerManager:
                     continue
                 try:
                     raw = (entry / "cmdline").read_bytes()
-                except (OSError, PermissionError):
+                except OSError, PermissionError:
                     continue
                 # cmdline is null-separated argv; we only care about argv[0]
                 argv0 = raw.split(b"\x00", 1)[0].decode(errors="replace")
@@ -521,7 +567,7 @@ class ServerManager:
                         text=True,
                         timeout=2,
                     )
-                except (FileNotFoundError, subprocess.TimeoutExpired):
+                except FileNotFoundError, subprocess.TimeoutExpired:
                     return  # no pgrep available; give up
                 for line in result.stdout.strip().splitlines():
                     try:
@@ -540,10 +586,10 @@ class ServerManager:
         for pid in orphans:
             try:
                 os.killpg(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 try:
                     os.kill(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
+                except ProcessLookupError, PermissionError:
                     pass
         # Short grace period, then SIGKILL any survivors.
         import time
@@ -552,10 +598,10 @@ class ServerManager:
         for pid in orphans:
             try:
                 os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 try:
                     os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
+                except ProcessLookupError, PermissionError:
                     pass
 
     def _stop_role(self, role: Role, grace_timeout: float = 5.0) -> None:
@@ -572,7 +618,7 @@ class ServerManager:
             # don't leave VRAM-holding children behind.
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError, PermissionError:
                 # Fall back to the direct-proc signal if the group is
                 # already gone or we can't signal it.
                 proc.send_signal(signal.SIGTERM)
@@ -581,7 +627,7 @@ class ServerManager:
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
+                except ProcessLookupError, PermissionError:
                     proc.kill()
 
     # ── Helpers ───────────────────────────────────────────
@@ -595,6 +641,12 @@ class ServerManager:
         if self.settings.tts.provider == "local":
             result["tts"] = self.settings.tts
         return result
+
+    @staticmethod
+    def _runtime_is_process_managed(model: ModelConfig) -> bool:
+        if model.provider != "local" or not model.runtime:
+            return False
+        return get_runtime(model.runtime).managed_process
 
     def _require_url(self, role: Role) -> str:
         url = {
@@ -612,6 +664,15 @@ class ServerManager:
         return parsed.port or 8000
 
     def _display_name(self, role: Role) -> str:
+        if role == "stt":
+            runtime = (
+                self.settings.stt.runtime
+                if self.settings.stt.provider == "local"
+                else None
+            )
+            if runtime == "onnx-asr":
+                return runtime
+            return "whisper-server"
         if role == "tts":
             runtime = (
                 self.settings.tts.runtime
@@ -621,7 +682,7 @@ class ServerManager:
             if runtime:
                 return runtime
             return "mlx-audio"
-        return {"stt": "whisper-server", "llm": "llm-server"}[role]
+        return "llm-server"
 
     def _get_log_tail(self, role: Role, lines: int = 15) -> list[str]:
         path = self._log_files.get(role)
@@ -633,7 +694,14 @@ class ServerManager:
 
     def _install_deps_for(self, role: Role, model: ModelConfig) -> bool:
         if role == "stt":
-            return self._ensure_whisper(model)
+            if model.runtime == "whispercpp":
+                return self._ensure_whisper(model)
+            if model.runtime == "onnx-asr":
+                return self._ensure_onnx_asr(model)
+            self.display.server_install_failed(
+                [f"Unsupported local STT runtime: {model.runtime}"]
+            )
+            return False
         if role == "llm":
             return self._ensure_llm(model)
         return self._ensure_tts(model)
@@ -908,6 +976,86 @@ class ServerManager:
                 [
                     "whisper-server binary not found after setup.",
                     f"Expected at: {whisper_bin}",
+                ]
+            )
+            return False
+        self.display.server_installed()
+        return True
+
+    def _ensure_onnx_asr(self, model: ModelConfig) -> bool:
+        runtime = get_runtime("onnx-asr")
+        if runtime.pip_module and runtime.pip_package:
+            try:
+                __import__(runtime.pip_module)
+            except ImportError:
+                self.display.server_installing([runtime.pip_package])
+                result = subprocess.run(
+                    ["uv", "pip", "install", runtime.pip_package],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    self.display.server_install_failed(
+                        result.stderr.strip().splitlines()[-10:]
+                    )
+                    return False
+                self.display.server_installed()
+
+        model_dir = _onnx_asr_model_dir(model.model, model.quantization)
+        if _onnx_asr_cache_populated(model_dir, model.quantization):
+            return True
+
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
+        model_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        label = f"onnx-asr model: {model.model} ({model.quantization or 'fp32'})"
+        self.display.server_installing([label])
+        script = """
+import os
+import sys
+
+import onnx_asr
+import onnxruntime as ort
+
+model_name = sys.argv[1]
+model_dir = sys.argv[2]
+quantization = sys.argv[3] or None
+
+opts = ort.SessionOptions()
+opts.inter_op_num_threads = 1
+opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
+
+onnx_asr.load_model(
+    model_name,
+    path=model_dir,
+    quantization=quantization,
+    sess_options=opts,
+    providers=["CPUExecutionProvider"],
+)
+""".strip()
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                model.model,
+                str(model_dir),
+                model.quantization or "",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout).strip().splitlines()[-10:]
+            self.display.server_install_failed(tail)
+            return False
+        if not _onnx_asr_cache_populated(model_dir, model.quantization):
+            expected = ", ".join(_onnx_asr_required_files(model.quantization))
+            self.display.server_install_failed(
+                [
+                    "onnx-asr model download finished but the cache is incomplete.",
+                    f"Expected under {model_dir}: {expected}",
                 ]
             )
             return False

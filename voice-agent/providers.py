@@ -10,6 +10,7 @@ import time
 import wave
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -48,9 +49,30 @@ from .display import TurnMetrics
 
 # Minimum character count before text is sent to TTS (matches SDK's _add_text threshold)
 _MIN_TTS_CHARS = 20
+_PROJECT_ROOT = Path(__file__).parent.parent
+_ONNX_ASR_CACHE_DIR = _PROJECT_ROOT / ".cache" / "onnx-asr"
 
 if TYPE_CHECKING:
     from .display import Display
+
+
+def _safe_cache_component(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
+    return safe or "model"
+
+
+def _onnx_asr_model_dir(model_name: str, quantization: str | None) -> Path:
+    suffix = quantization or "fp32"
+    return _ONNX_ASR_CACHE_DIR / f"{_safe_cache_component(model_name)}-{suffix}"
+
+
+def _onnx_asr_session_options():
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.inter_op_num_threads = 1
+    opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
+    return opts
 
 
 class StreamingTTSModel(OpenAITTSModel):
@@ -290,6 +312,72 @@ def _wav_16k(audio_input: AudioInput) -> bytes:
     return _audio_input_to_wav(audio_input, target_rate=16000)
 
 
+class OnnxAsrSTTModel(STTModel):
+    """In-process CPU STT adapter using onnx-asr."""
+
+    def __init__(
+        self,
+        model_name: str,
+        quantization: str | None,
+        model_dir: Path,
+    ):
+        self._model_name = model_name
+        self._quantization = quantization
+        self._model_dir = model_dir
+        self._model: object | None = None
+
+    @property
+    def model_name(self) -> str:
+        if self._quantization:
+            return f"{self._model_name} ({self._quantization})"
+        return self._model_name
+
+    async def transcribe(
+        self,
+        input: AudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> str:
+        audio = np.asarray(input.buffer)
+        if np.issubdtype(audio.dtype, np.floating):
+            waveform = np.clip(audio, -1.0, 1.0).astype(np.float32, copy=False)
+        else:
+            waveform = audio.astype(np.float32) / 32768.0
+        sample_rate = input.frame_rate
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(
+            None,
+            self._recognize,
+            waveform,
+            sample_rate,
+        )
+        return text.strip()
+
+    def _recognize(self, waveform: np.ndarray, sample_rate: int) -> str:
+        if self._model is None:
+            import onnx_asr
+
+            self._model = onnx_asr.load_model(
+                self._model_name,
+                path=str(self._model_dir),
+                quantization=self._quantization,
+                sess_options=_onnx_asr_session_options(),
+                providers=["CPUExecutionProvider"],
+            )
+        result = self._model.recognize(waveform, sample_rate=sample_rate)  # type: ignore[attr-defined]
+        return result if isinstance(result, str) else str(result)
+
+    async def create_session(
+        self,
+        input: StreamedAudioInput,
+        settings: STTModelSettings,
+        trace_include_sensitive_data: bool,
+        trace_include_sensitive_audio_data: bool,
+    ) -> StreamedTranscriptionSession:
+        raise NotImplementedError("Streamed sessions not supported by OnnxAsrSTTModel")
+
+
 class WhisperCppSTTModel(STTModel):
     """STT model that calls whisper.cpp server's /inference endpoint."""
 
@@ -348,7 +436,7 @@ class AudioPassthroughSTTModel(STTModel):
     def __init__(
         self,
         workflow: TranscriptVoiceWorkflow,
-        real_stt: WhisperCppSTTModel,
+        real_stt: STTModel,
     ):
         self._workflow = workflow
         self._real_stt = real_stt
@@ -1064,15 +1152,26 @@ def create_pipeline(
     stt = settings.stt
     llm = settings.llm
     stt_model: str | STTModel = stt.model
-    if stt.provider == "local" and settings.stt_url:
-        whisper_stt = WhisperCppSTTModel(stt.model, settings.stt_url)
+    if stt.provider == "local":
+        if stt.runtime == "whispercpp":
+            if not settings.stt_url:
+                raise ValueError("whispercpp STT requires [local].stt_url")
+            real_stt: STTModel = WhisperCppSTTModel(stt.model, settings.stt_url)
+        elif stt.runtime == "onnx-asr":
+            real_stt = OnnxAsrSTTModel(
+                model_name=stt.model,
+                quantization=stt.quantization,
+                model_dir=_onnx_asr_model_dir(stt.model, stt.quantization),
+            )
+        else:
+            raise ValueError(f"Unsupported local STT runtime: {stt.runtime}")
         # Audio-passthrough only makes sense when the LLM is also local and
         # accepts audio directly — otherwise the audio blob never reaches a
         # model that can consume it.
         if llm.provider == "local" and llm.audio_input:
-            stt_model = AudioPassthroughSTTModel(workflow, whisper_stt)
+            stt_model = AudioPassthroughSTTModel(workflow, real_stt)
         else:
-            stt_model = whisper_stt
+            stt_model = real_stt
     elif stt.provider == "cloud" and stt.api_key:
         # Same override rationale as the cloud TTS branch above.
         stt_client = AsyncOpenAI(

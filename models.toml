@@ -7,7 +7,8 @@
 # from `provider` — don't include it in `name`.
 #
 # Local entries must declare a `runtime`. Registered runtimes per role:
-#   STT — whispercpp      (linux + macOS)
+#   STT — whispercpp      (linux + macOS),
+#         onnx-asr        (linux + macOS, CPU in-process)
 #   LLM — llamacpp        (linux + macOS),
 #         mlx-vlm         (macOS only)
 #   TTS — mlx-audio       (macOS only),
@@ -39,6 +40,14 @@ provider = "local"
 runtime  = "whispercpp"
 model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix (see setup-whispercpp.sh)
 language = "auto"                   # whisper.cpp language hint: "auto" or a code like "en" / "es"
+
+[[stt]]
+name         = "parakeet-tdt-v3-int8"
+provider     = "local"
+runtime      = "onnx-asr"
+model        = "nemo-parakeet-tdt-0.6b-v3"
+quantization = "int8"
+language     = "auto"                   # Parakeet TDT v3 auto-detects language
 
 [[stt]]
 name     = "gpt-4o-transcribe"

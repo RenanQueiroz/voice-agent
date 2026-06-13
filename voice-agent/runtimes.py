@@ -1,7 +1,7 @@
 """Registry of the local runtimes the app can drive.
 
-Each role (STT / LLM / TTS) has a set of possible runtimes — whisper.cpp
-for STT, llama.cpp / mlx-vlm for LLM, mlx-audio / kokoro-fastapi
+Each role (STT / LLM / TTS) has a set of possible runtimes — whisper.cpp /
+onnx-asr for STT, llama.cpp / mlx-vlm for LLM, mlx-audio / kokoro-fastapi
 / qwen3-tts / supertonic for TTS. Users pick one per active local model via the
 `runtime` field in models.toml.
 
@@ -13,13 +13,15 @@ This module is the single source of truth for:
 - the Python module to import to check if a runtime is installed
   (`pip_module`, None for binary runtimes like llamacpp/whispercpp and
   for isolated server runtimes like supertonic / kokoro-fastapi / qwen3-tts),
+- whether the runtime launches a supervised server process or runs in-process,
+- whether the runtime needs a local URL in config.toml,
 - the health-check endpoint to poll once the server is launched, plus
   an optional response-body check for servers whose 200 response still
   needs semantic readiness validation (Qwen3-TTS, Supertonic).
 
-Adding another local TTS runtime is a matter of adding an entry here
-and teaching `ServerManager._start_tts` to dispatch on the new
-`runtime` value.
+Adding another local runtime is a matter of adding an entry here and teaching
+`ServerManager` / `providers.create_pipeline` to dispatch on the new `runtime`
+value.
 """
 
 from __future__ import annotations
@@ -57,6 +59,8 @@ class Runtime:
     pip_module: str | None  # None for binary runtimes (llamacpp / whispercpp)
     pip_package: str | None  # package to `uv pip install` if missing
     health_path: str  # relative path polled by ServerManager._wait_ready
+    managed_process: bool = True  # False for in-process runtimes like onnx-asr
+    requires_url: bool = True  # False when no [local].<role>_url is needed
     # Decides "ready" from the health response. Default accepts any 200.
     # Qwen3-TTS needs a body check because /health returns 200 during
     # torch.compile warmup with `{"status": "initializing"}`.
@@ -71,6 +75,16 @@ RUNTIMES: dict[str, Runtime] = {
         pip_module=None,
         pip_package=None,
         health_path="/",
+    ),
+    "onnx-asr": Runtime(
+        id="onnx-asr",
+        role="stt",
+        supported_os=frozenset({"darwin", "linux"}),
+        pip_module="onnx_asr",
+        pip_package="onnx-asr[cpu,hub]",
+        health_path="",
+        managed_process=False,
+        requires_url=False,
     ),
     "llamacpp": Runtime(
         id="llamacpp",

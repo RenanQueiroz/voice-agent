@@ -31,6 +31,9 @@ supertonic-server/
 # Qwen3 TTS
 qwen3-tts/
 
+# Local runtime caches
+.cache/onnx-asr/
+
 # Active model selections (user-specific, written by the Switch modal)
 preferences.toml
 

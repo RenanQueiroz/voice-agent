@@ -1,8 +1,8 @@
 # Voice Agent
 
-A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). It uses a 3-model pipeline (STT, LLM, TTS) where each role can be cloud (OpenAI API / Gemini) or local (whisper.cpp / llama.cpp / MLX on Apple Silicon / Supertonic / Kokoro-FastAPI / Qwen3-TTS) independently. The terminal UI is a fullscreen Textual app with clickable controls and flicker-free streaming.
+A real-time speech-to-speech voice agent built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). It uses a 3-model pipeline (STT, LLM, TTS) where each role can be cloud (OpenAI API / Gemini) or local (whisper.cpp / ONNX ASR / llama.cpp / MLX on Apple Silicon / Supertonic / Kokoro-FastAPI / Qwen3-TTS) independently. The terminal UI is a fullscreen Textual app with clickable controls and flicker-free streaming.
 
-Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama.cpp + whisper.cpp + Supertonic CPU TTS + Kokoro-FastAPI / Qwen3-TTS for NVIDIA TTS, plus any cloud role; MLX is Apple-Silicon-only and is filtered out of the catalog on Linux). On **Windows** run the app through [WSL2](https://learn.microsoft.com/windows/wsl/install).
+Runs on **macOS** (whisper.cpp + ONNX ASR + llama.cpp + MLX + Supertonic, plus any cloud role) and **Linux** (llama.cpp + whisper.cpp + ONNX ASR + Supertonic CPU TTS + Kokoro-FastAPI / Qwen3-TTS for NVIDIA TTS, plus any cloud role; MLX is Apple-Silicon-only and is filtered out of the catalog on Linux). On **Windows** run the app through [WSL2](https://learn.microsoft.com/windows/wsl/install).
 
 ## Features
 
@@ -21,15 +21,15 @@ Runs on **macOS** (all runtimes except Linux-only CUDA TTS) and **Linux** (llama
 - **MCP tools**: connect MCP servers via `mcp_servers.toml` with per-server `enabled` toggle.
 - **OpenAI-hosted tools**: cloud OpenAI LLM entries can enable `web_search`, `code_interpreter`, and `file_search` directly from `models.toml` (not supported on Gemini).
 - **Shell tool (opt-in, with approval)**: the agent can propose shell commands that you approve/decline per invocation (or auto-approve if you trust the prompts).
-- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux+NVIDIA, OpenBLAS CPU fallback when available), installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
-- **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `llamacpp` / `mlx-vlm` / `mlx-audio` / `supertonic` / `kokoro-fastapi` / `qwen3-tts`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
-- **Per-turn metrics**: STT, LLM (with TTFT), TTS (with first-audio latency), and total timing inline with each turn. Audio-input local LLM turns also show `Audio->LLM` and background Whisper timing so it is clear whether STT stayed off the response path.
+- **Auto-setup for local roles**: installs Python deps, system packages via the detected package manager (brew/apt/dnf/pacman/zypper), builds whisper.cpp (with Metal on macOS, CUDA on Linux+NVIDIA, OpenBLAS CPU fallback when available), installs/caches ONNX ASR models, installs llama.cpp (prebuilt on macOS / Linux CPU / Linux ARM; source build with CUDA on Linux+NVIDIA), and patches known compatibility issues.
+- **OS-aware model catalog**: each local entry declares a `runtime` (`whispercpp` / `onnx-asr` / `llamacpp` / `mlx-vlm` / `mlx-audio` / `supertonic` / `kokoro-fastapi` / `qwen3-tts`); entries whose runtime doesn't run on the current OS are filtered out of the Switch modal at startup. If `preferences.toml` points at a filtered entry, the app auto-falls back to the first compatible one and surfaces a notice.
+- **Per-turn metrics**: STT, LLM (with TTFT), TTS (with first-audio latency), and total timing inline with each turn. Audio-input local LLM turns also show `Audio->LLM` and background STT timing so it is clear whether transcription stayed off the response path.
 
 ## Prerequisites
 
 - **Operating system**:
-  - **macOS** on Apple Silicon (M1/M2/M3/M4) — all local runtimes available.
-  - **Linux** (x86_64 or aarch64) — `whispercpp` (STT), `llamacpp` (LLM), `supertonic` CPU TTS, and (with NVIDIA GPU) `kokoro-fastapi` / `qwen3-tts` for CUDA local TTS. MLX-backed entries are filtered out since the `mlx` package has no Linux wheels.
+  - **macOS** on Apple Silicon (M1/M2/M3/M4) — all local runtimes except Linux-only CUDA TTS.
+  - **Linux** (x86_64 or aarch64) — `whispercpp` and `onnx-asr` (STT), `llamacpp` (LLM), `supertonic` CPU TTS, and (with NVIDIA GPU) `kokoro-fastapi` / `qwen3-tts` for CUDA local TTS. MLX-backed entries are filtered out since the `mlx` package has no Linux wheels.
   - **Windows**: not supported natively — install [WSL2](https://learn.microsoft.com/windows/wsl/install) and run the app from a Linux shell.
 - **Python 3.14+**
 - **[uv](https://docs.astral.sh/uv/)** package manager — install via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
@@ -108,7 +108,7 @@ enable_mcp = true                  # load MCP servers from mcp_servers.toml
 [local]                            # only consulted for roles whose active model is local
 # Each URL is served by whichever runtime is active for that role. The app
 # filters runtimes by OS, so only the ones you need ever get consulted.
-stt_url = "http://localhost:9000"  # whispercpp
+stt_url = "http://localhost:9000"  # whispercpp only; onnx-asr runs in-process
 tts_url = "http://localhost:8000"  # mlx-audio / supertonic / kokoro-fastapi / qwen3-tts
 llm_url = "http://localhost:8080"  # llamacpp / mlx-vlm
 # whisper_threads = 16             # optional; defaults to half the detected CPU thread count
@@ -147,6 +147,7 @@ Local entries must declare a `runtime`; allowed values per role:
 | Role | Runtime           | OS support        |
 |------|-------------------|-------------------|
 | stt  | `whispercpp`      | darwin, linux     |
+| stt  | `onnx-asr`        | darwin, linux     |
 | llm  | `llamacpp`        | darwin, linux     |
 | llm  | `mlx-vlm`         | darwin only       |
 | tts  | `mlx-audio`       | darwin only       |
@@ -167,6 +168,14 @@ provider = "local"
 runtime  = "whispercpp"
 model    = "large-v3-turbo-q5_0"   # whisper.cpp model file suffix
 language = "auto"                  # "auto" or a code like "en" / "es"
+
+[[stt]]
+name         = "parakeet-tdt-v3-int8"
+provider     = "local"
+runtime      = "onnx-asr"                 # CPU-only, in-process
+model        = "nemo-parakeet-tdt-0.6b-v3"
+quantization = "int8"                     # only supported ONNX ASR quantization today
+language     = "auto"                     # Parakeet TDT v3 auto-detects language
 
 [[stt]]
 name     = "gpt-4o-transcribe"
@@ -277,6 +286,8 @@ voice    = "Sulafat"                    # see https://ai.google.dev/gemini-api/d
 ```
 
 **Per-model `api_key` override.** Any cloud entry can set `api_key = "${VAR_NAME}"` to pull from a specific env var, overriding the vendor-wide `OPENAI_API_KEY` / `GEMINI_API_KEY`. Use this when one key is rate-limited or scoped to a subset of models. Literal values work but are checked in — prefer env-var references.
+
+**STT `quantization`.** Only local `runtime = "onnx-asr"` STT entries can set `quantization`, and phase one supports only `"int8"`. The ONNX ASR runtime runs on CPU in-process, downloads model files into `./.cache/onnx-asr/`, and does not need `[local].stt_url`.
 
 **`reasoning_effort` on reasoning-capable LLMs.** Gemini 3 preview flash and GPT-5 models do server-side thinking before emitting tokens; the default (typically `medium`) makes first-token latency unacceptable for voice. `"minimal"` drops it to ~1s. Hosted OpenAI tools require at least `"low"`, since the tool calls are themselves part of the reasoning process.
 
@@ -391,7 +402,7 @@ Hosted tools go through the OpenAI Responses API, which is why the OpenAI LLM pa
 
 ```
 User speaks -> Mic (24kHz) -> Silero VAD -> Speech segment
-    -> STT (whisper / gpt-4o-transcribe)         -> Text
+    -> STT (whisper / parakeet / gpt-4o-transcribe) -> Text
     -> LLM (gemma / gpt-5.4-mini / …) -> [tool calls] -> Response text (streamed)
     -> TTS (kokoro / supertonic / qwen3 / gpt-4o-mini-tts) -> Audio
     -> Speaker playback
@@ -416,6 +427,7 @@ voice-agent/
   pipeline.py       # Async _run_vad loop, _process_turn,
                     #   run_pipeline_loops entrypoint
   providers.py      # TranscriptVoiceWorkflow, WhisperCppSTTModel,
+                    #   OnnxAsrSTTModel,
                     #   StreamingTTSModel, QwenStreamingTTSModel,
                     #   SupertonicTTSModel, AudioPassthroughSTTModel,
                     #   create_agent / create_pipeline, _hosted_tools
@@ -430,12 +442,12 @@ voice-agent/
 ### Key design decisions
 
 - **Per-role providers, not a single mode.** Each `[[stt]] / [[llm]] / [[tts]]` entry marks itself `provider = "cloud" | "local"` (cloud entries can also set `vendor = "gemini"`). The `ServerManager` is a reconciler: it starts only the local server(s) needed by the currently active selection and restarts on a swap.
-- **Local servers use runtime-specific adapters where needed.** mlx-audio, mlx-vlm, and llama-server expose `/v1/...` endpoints, so we reuse the SDK's `OpenAITTSModel` / `OpenAIResponsesModel` and point `AsyncOpenAI` at localhost. Local STT uses a custom `WhisperCppSTTModel` hitting whisper-server's `/inference`; the app already sends mono 16 kHz WAV segments from Python-side Silero VAD, so whisper-server runs without its own VAD or ffmpeg conversion. The `[[stt]].language` field is sent per request (`"auto"` for whisper.cpp language detection, or a fixed code like `"en"` / `"es"`). Supertonic also exposes an OpenAI-compatible alias, but the app uses its native `/v1/tts` endpoint so it can preserve the official server's 44.1 kHz WAV output.
+- **Local runtimes use runtime-specific adapters where needed.** mlx-audio, mlx-vlm, and llama-server expose `/v1/...` endpoints, so we reuse the SDK's `OpenAITTSModel` / `OpenAIResponsesModel` and point `AsyncOpenAI` at localhost. Local whisper.cpp STT uses `WhisperCppSTTModel` against whisper-server's `/inference`; local ONNX ASR uses `OnnxAsrSTTModel` in-process with `CPUExecutionProvider`. The app already sends post-VAD speech segments, so neither path enables server-side VAD. The `[[stt]].language` field is sent per request for whisper.cpp; Parakeet TDT v3 auto-detects language and may not honor a forced code. Supertonic also exposes an OpenAI-compatible alias, but the app uses its native `/v1/tts` endpoint so it can preserve the official server's 44.1 kHz WAV output.
 - **TTS output sample rate is runtime-derived.** The Agents SDK voice events carry audio arrays but no sample-rate metadata. Existing TTS paths are treated as 24 kHz int16 PCM; Supertonic decodes WAV to int16 PCM and plays it at 44.1 kHz. Do not infer this from chunk length or resample Supertonic down by default.
 - **OpenAI and local Responses-capable LLMs use Responses, not Chat Completions.** To support hosted tools the OpenAI cloud LLM path constructs `OpenAIResponsesModel` with an explicit base URL + `Omit()` headers — this dodges env vars like `OPENAI_BASE_URL` / `OPENAI_ORG_ID` that would otherwise redirect traffic or trigger Gemini's "Multiple authentication credentials received" 400. Local mlx-vlm and llama.cpp text-only paths also use `OpenAIResponsesModel`. The exception is llama.cpp native audio: llama-server currently converts `/v1/responses` to Chat Completions internally and rejects `input_audio`, so `runtime = "llamacpp"` with `audio_input = true` stays on the chat adapter to preserve the STT bypass.
 - **Gemini integration is split across two paths.** LLM goes through Gemini's OpenAI-compatible endpoint (we reuse `OpenAIChatCompletionsModel` with a different base URL). TTS does not have an OpenAI-compat counterpart, so `gemini_tts.py` wraps the native `generateContent` API and exposes it as a `TTSModel`.
 - **Flicker-free streaming.** Each turn is its own widget; agent text and local-only reasoning text are `reactive` attributes that re-render only that one widget per token. Rich `Live` is gone; Textual owns the screen.
-- **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped. Passthrough sends the LLM a multimodal user message: a short text instruction plus a 16 kHz WAV audio part, matching llama.cpp's current audio-projector preprocessing path. Background Whisper still runs for display/history cleanup. Passthrough turns add `Audio->LLM` and `BG STT` to the agent metrics line: the first value is time from VAD segment finalization to LLM handoff, and the second is the background Whisper transcript duration. The TTS metric starts when first model text enters the SDK TTS stage and includes playback drain; it does not include LLM TTFT. Stage timings can overlap because TTS may begin before the LLM has finished streaming all text.
+- **Audio-passthrough** (`audio_input = true` on a local LLM) only engages when both STT and LLM are local. Otherwise the audio blob would be dropped. Passthrough sends the LLM a multimodal user message: a short text instruction plus a 16 kHz WAV audio part, matching llama.cpp's current audio-projector preprocessing path. Background STT still runs for display/history cleanup. Passthrough turns add `Audio->LLM` and `BG STT` to the agent metrics line: the first value is time from VAD segment finalization to LLM handoff, and the second is the background transcript duration. The TTS metric starts when first model text enters the SDK TTS stage and includes playback drain; it does not include LLM TTFT. Stage timings can overlap because TTS may begin before the LLM has finished streaming all text.
 - **Echo suppression by mic muting.** There is no AEC — we mute the microphone while the agent is speaking. Press Space to interrupt instead of speaking over it.
 
 ## Scripts
@@ -499,6 +511,18 @@ corresponding TTS entry in the Settings modal, or you can run them manually:
 
 **Qwen3 first-boot warmup.** The server launches quickly but the first TTS request is slow: the 0.6B model downloads from Hugging Face (~1.2 GB, cached under `./.cache/qwen3-tts/hf/`), then torch.compile's max-autotune + CUDA graph capture + a 3-pass warmup add up to 60–120 s before audio starts flowing. The runtime's health probe waits on `{"status": "healthy"}`, not just HTTP 200, so the splash shows a "Waiting…" heartbeat instead of falsely reporting ready. Subsequent boots reuse `./.cache/qwen3-tts/torchinductor/` and warm up in ~30 s.
 
+## Local STT runtimes
+
+`whispercpp` runs a supervised whisper-server process on `[local].stt_url`.
+The app downloads/builds whisper.cpp through `setup-whispercpp.sh` and restarts
+that server when you switch local whisper models.
+
+`onnx-asr` runs entirely in the main app process on CPU. First selection installs
+`onnx-asr[cpu,hub]` if missing, downloads the selected model into
+`./.cache/onnx-asr/`, and then lazy-loads the model object on the first turn.
+The default ONNX entry is quantized Parakeet TDT v3 (`quantization = "int8"`),
+which avoids VRAM use and does not need `[local].stt_url`.
+
 **Voice / instruct.** Kokoro-FastAPI exposes the full 66-voice catalog via `voice = "af_heart"` etc. (mixing supported: `"af_bella+af_sky"`). Qwen3-TTS has 9 CustomVoice speakers (`Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee`) and accepts a free-form `instruct = "..."` style control (e.g. `"Speak in a warm, conversational tone"`).
 
 ## Development
@@ -526,9 +550,12 @@ On an API error the tail of the relevant log is rendered as an inline card.
 
 ### Local-server topology
 
-Each local role has exactly one backing process, started on demand, selected by the active model's `runtime`:
+Local roles are selected by each active model's `runtime`. Most local runtimes
+have one backing process started on demand; `onnx-asr` is the exception and runs
+in-process:
 
 - **whisper-server** (STT, port 9000) — `runtime = "whispercpp"`. whisper.cpp HTTP server. The app handles VAD before the request, uploads mono 16 kHz WAV directly, and asks whisper.cpp for plain text without timestamps or temperature fallback for lower interactive latency. Local STT entries default `language = "auto"` when omitted, so whisper.cpp detects the spoken language unless a catalog entry pins a specific language code. The server starts with `-t [local].whisper_threads`, defaulting to half the detected CPU thread count and overrideable via `WHISPER_THREADS`, plus `--flash-attn` and `--suppress-nst` for faster attention where supported and fewer non-speech-token artifacts. Runs on macOS and Linux. Restarted when you pick a different local STT model.
+- **ONNX ASR** (STT, no port) — `runtime = "onnx-asr"`. CPU-only in-process adapter using `onnx-asr` and ONNX Runtime `CPUExecutionProvider`. Model files live under `./.cache/onnx-asr/<model>-<quantization>/`; empty or incomplete cache directories are repaired on reconcile. The phase-one catalog uses Parakeet TDT v3 int8 and does not launch whisper-server.
 - **TTS servers** (port 8000) — which one runs depends on the active TTS entry's `runtime`:
   - `runtime = "mlx-audio"` — macOS-only. Model-agnostic; swapping between mlx-audio TTS entries does **not** require a restart.
   - `runtime = "supertonic"` — macOS + Linux CPU. Official Supertonic server at `./supertonic-server/`, launched via its own uv venv. Health waits for `/v1/health` to return `{"status": "ok"}`. The app uses native `/v1/tts`, decodes the 44.1 kHz WAV response to PCM, and plays it at 44.1 kHz.
